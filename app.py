@@ -1,9 +1,11 @@
 """Flask backend — reads Outlook via macOS JXA, stores pipeline in local Excel."""
-from flask import Flask, jsonify, request, send_file, render_template
+import json
+import time
+from flask import Flask, jsonify, request, send_file, render_template, Response, stream_with_context
 from flask_cors import CORS
 
 import excel_manager as xl
-from outlook_mac_client import OutlookMacClient, group_messages_by_domain
+from outlook_mac_client import OutlookMacClient, group_messages_by_domain, parse_email_address
 from config.settings import FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL, EXCEL_FILE_PATH
 
 app = Flask(__name__)
@@ -11,6 +13,24 @@ app.secret_key = FLASK_SECRET_KEY
 CORS(app)
 
 _outlook = OutlookMacClient()
+
+# Simple in-memory email cache (5-minute TTL) to avoid re-running JXA on auto-classify
+_email_cache: dict = {"messages": [], "grouped": [], "ts": 0}
+_CACHE_TTL = 300  # seconds
+
+
+def _get_emails_cached(limit: int = 200) -> tuple[list, list]:
+    if time.time() - _email_cache["ts"] < _CACHE_TTL and _email_cache["messages"]:
+        return _email_cache["messages"], _email_cache["grouped"]
+    messages = _outlook.get_all_messages(limit)
+    grouped  = group_messages_by_domain(messages)
+    _email_cache.update({"messages": messages, "grouped": grouped, "ts": time.time()})
+    return messages, grouped
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
 
 # ── Status ─────────────────────────────────────────────────────────────────
 
@@ -35,8 +55,7 @@ def test_connection():
 def get_emails():
     try:
         limit    = int(request.args.get("top", 150))
-        messages = _outlook.get_all_messages(limit)
-        grouped  = group_messages_by_domain(messages)
+        messages, grouped = _get_emails_cached(limit)
         return jsonify({"messages": messages[:60], "grouped": grouped})
     except Exception as e:
         return jsonify({"error": str(e), "messages": [], "grouped": []}), 500
@@ -106,6 +125,85 @@ def log_company_emails(company_name):
         return jsonify({"added": added})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ── Auto-classify (SSE streaming) ──────────────────────────────────────────
+
+@app.route("/api/auto-classify", methods=["POST"])
+def auto_classify():
+    from ai_classifier import classify_domain_emails
+
+    def generate():
+        try:
+            yield _sse({"type": "status", "message": "Fetching emails from Outlook…"})
+
+            messages, grouped = _get_emails_cached(200)
+
+            if not grouped:
+                yield _sse({"type": "done", "classified": 0, "errors": 0,
+                            "message": "No email groups found. Make sure Outlook is open."})
+                return
+
+            # Build domain → messages lookup in one pass
+            own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
+            domain_msgs: dict[str, list] = {}
+            for msg in messages:
+                _, from_addr = parse_email_address(msg.get("from"))
+                d = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
+                if not d or d == own_domain:
+                    continue
+                domain_msgs.setdefault(d, []).append(msg)
+
+            total = len(grouped)
+            yield _sse({"type": "start", "total": total})
+
+            classified = 0
+            errors     = 0
+
+            for i, group in enumerate(grouped):
+                domain   = group["domain"]
+                contacts = group.get("contacts", [])
+                msgs     = domain_msgs.get(domain, [])
+
+                yield _sse({
+                    "type":   "progress",
+                    "domain": domain,
+                    "index":  i + 1,
+                    "total":  total,
+                })
+
+                try:
+                    result = classify_domain_emails(domain, msgs, contacts)
+
+                    # Carry over last email date from grouped data
+                    if group.get("last_email_date") and not result.get("Last Email Date"):
+                        result["Last Email Date"] = group["last_email_date"][:10]
+
+                    xl.upsert_company(result)
+
+                    yield _sse({
+                        "type":    "result",
+                        "domain":  domain,
+                        "company": result.get("Company", domain),
+                        "status":  result.get("Status", ""),
+                        "contact": result.get("Contact Name", ""),
+                        "saved":   True,
+                    })
+                    classified += 1
+
+                except Exception as e:
+                    yield _sse({"type": "error", "domain": domain, "error": str(e)})
+                    errors += 1
+
+            yield _sse({"type": "done", "classified": classified, "errors": errors})
+
+        except Exception as e:
+            yield _sse({"type": "fatal", "error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 # ── Excel download ─────────────────────────────────────────────────────────
 

@@ -416,6 +416,133 @@ async function testConnection() {
   }
 }
 
+// ── Auto-classify ──────────────────────────────────────────────────────────
+async function autoClassify() {
+  const btn     = document.getElementById('classify-btn');
+  const panel   = document.getElementById('classify-panel');
+  const log     = document.getElementById('classify-log');
+  const heading = document.getElementById('classify-heading');
+  const counter = document.getElementById('classify-counter');
+  const summary = document.getElementById('classify-summary');
+  const barWrap = document.getElementById('classify-progress-bar-wrap');
+  const bar     = document.getElementById('classify-progress-bar');
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Classifying…';
+
+  panel.style.display = 'block';
+  log.innerHTML       = '';
+  summary.style.display = 'none';
+  barWrap.style.display = 'none';
+  bar.style.width       = '0%';
+  heading.textContent   = '✦ AI Classification — fetching emails…';
+  counter.textContent   = '';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  const addLine = (html) => {
+    const div = document.createElement('div');
+    div.className = 'classify-status-line';
+    div.innerHTML = html;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  };
+
+  let total = 0, done = 0;
+
+  try {
+    const resp = await fetch('/api/auto-classify', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{}' });
+
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(t);
+    }
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   buf     = '';
+
+    while (true) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();          // keep incomplete chunk
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+        if (evt.type === 'status') {
+          heading.textContent = '✦ AI Classification — ' + evt.message;
+
+        } else if (evt.type === 'start') {
+          total = evt.total;
+          barWrap.style.display = 'block';
+          heading.textContent   = `✦ AI Classification — processing ${total} domain(s)`;
+          addLine(`<span style="color:#5c35c8;font-weight:600">Found ${total} email group(s). Classifying with Claude…</span>`);
+
+        } else if (evt.type === 'progress') {
+          done = evt.index;
+          bar.style.width  = Math.round((done / total) * 100) + '%';
+          counter.textContent = `${done} / ${total}`;
+          addLine(`<span class="cl-domain">${esc(evt.domain)}</span><span class="spinner" style="width:10px;height:10px;border-width:2px"></span>`);
+
+        } else if (evt.type === 'result') {
+          // Replace last spinner line with result
+          const last = log.lastElementChild;
+          if (last) last.remove();
+          addLine(
+            `<span class="cl-company">${esc(evt.company)}</span>` +
+            `<span class="cl-domain">${esc(evt.domain)}</span>` +
+            `<span class="badge badge-${esc(evt.status)} cl-status">${esc(evt.status)}</span>` +
+            (evt.contact ? `<span style="font-size:11px;color:#555">${esc(evt.contact)}</span>` : '')
+          );
+
+        } else if (evt.type === 'error') {
+          const last = log.lastElementChild;
+          if (last) last.remove();
+          addLine(
+            `<span class="cl-domain">${esc(evt.domain)}</span>` +
+            `<span class="cl-err">⚠ ${esc(evt.error)}</span>`
+          );
+
+        } else if (evt.type === 'done') {
+          bar.style.width       = '100%';
+          counter.textContent   = `${evt.classified} classified`;
+          heading.textContent   = '✦ AI Classification — complete';
+          summary.style.display = 'flex';
+          summary.innerHTML =
+            `<strong style="color:#2e7d32">✓ ${evt.classified} deal(s) saved to Excel</strong>` +
+            (evt.errors ? `<span style="color:#c62828">${evt.errors} error(s)</span>` : '') +
+            `<button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reloadAfterClassify()">Reload Pipeline</button>`;
+
+        } else if (evt.type === 'fatal') {
+          heading.textContent = '✦ AI Classification — failed';
+          addLine(`<span class="cl-err">Fatal error: ${esc(evt.error)}</span>`);
+          toast('Auto-classify failed: ' + evt.error, 'error');
+        }
+      }
+    }
+  } catch (e) {
+    heading.textContent = '✦ AI Classification — failed';
+    addLine(`<span class="cl-err">${esc(e.message)}</span>`);
+    toast('Auto-classify error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '✦ Auto-classify All';
+  }
+}
+
+async function reloadAfterClassify() {
+  await loadCompanies();
+  renderAll();
+  toast('Pipeline reloaded', 'success');
+}
+
 // ── Search / filter ────────────────────────────────────────────────────────
 function onSearch()       { renderCompaniesTable(); }
 function onFilterChange() { renderCompaniesTable(); }

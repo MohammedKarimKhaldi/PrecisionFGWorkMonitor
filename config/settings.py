@@ -3,15 +3,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
-AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")
-AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
-USER_EMAIL = os.environ.get("USER_EMAIL", "")
-EXCEL_FILE_PATH = os.environ.get("EXCEL_FILE_PATH", "/Documents/FundraisingTracker.xlsx")
-FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
+OUTLOOK_EMAIL    = os.environ.get("OUTLOOK_EMAIL", "")
+OUTLOOK_PASSWORD = os.environ.get("OUTLOOK_PASSWORD", "")
+IMAP_SERVER      = os.environ.get("IMAP_SERVER", "")  # auto-detected if blank
+IMAP_PORT        = 993
 
-GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
-GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
+EXCEL_FILE_PATH  = os.environ.get("EXCEL_FILE_PATH", "./FundraisingTracker.xlsx")
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
 
 MANDATE_STATUSES = [
     "Initial Contact",

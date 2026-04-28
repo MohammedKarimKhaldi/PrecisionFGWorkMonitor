@@ -1,32 +1,47 @@
 # PrecisionFG Fundraising Email Monitor
 
-A web app that reads your Outlook inbox via Microsoft Graph API and tracks fundraising mandate discussions with asset managers in a shared Excel workbook on OneDrive.
+A web app (open in Chrome) that reads your Outlook inbox via **IMAP** and tracks
+fundraising mandate discussions with asset managers in a **local Excel workbook**.
+
+No Azure App registration required.
 
 ## Features
 
-- **Outlook integration** – reads inbox + sent items via Microsoft Graph API (OAuth2 delegated auth)
-- **Pipeline dashboard** – table of all companies with status badges, contact info, mandate type, AUM
-- **Status tracking** – 10-stage pipeline: Initial Contact → In Discussion → Proposal Sent → Due Diligence → Mandate Received / Closed
-- **Email thread view** – click a company to see the full email exchange
-- **Shared Excel workbook** – automatically created on your OneDrive; two sheets: *Companies* and *Email Log*
-- **Live search & filter** – filter pipeline by status or search by company/contact name
+- **Outlook integration** — reads inbox + sent items via standard IMAP protocol
+- **Pipeline dashboard** — companies with status badges, contact, mandate type, AUM
+- **Status tracking** — 10-stage pipeline from Initial Contact to Closed
+- **Email thread view** — click any company to see matching email exchange
+- **Local Excel workbook** — auto-created as `FundraisingTracker.xlsx`; two sheets: *Companies* and *Email Log*
+- **Log emails to Excel** — one click to append the current email thread to the log sheet
+- **Search & filter** — filter by status or search by company/contact name
 
 ## Setup
 
-### 1. Register an Azure AD App
+### 1. Enable IMAP in Outlook
 
-1. Go to [Azure Portal → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApp/ApplicationsListBlade)
-2. **New registration** → name it "PrecisionFG Monitor" → Redirect URI: `http://localhost:5000/auth/callback`
-3. Copy the **Application (client) ID** and **Directory (tenant) ID**
-4. Go to **Certificates & secrets** → New client secret → copy the value
-5. Go to **API permissions** → Add: `Mail.Read`, `Mail.ReadBasic`, `Files.ReadWrite`, `User.Read` (all Delegated)
-6. Click **Grant admin consent**
+**Outlook.com / Hotmail / Live (personal account)**
+1. Go to Outlook.com → Settings → Mail → Sync email → POP and IMAP
+2. Enable IMAP access
+3. If you have 2-factor authentication: go to [account.microsoft.com/security](https://account.microsoft.com/security) → Advanced security → App passwords → create one
+
+**Microsoft 365 work account**
+- IMAP server: `outlook.office365.com`
+- Basic auth must be enabled for your mailbox by your IT admin, or use an app password
+- Ask your IT department to enable "Authenticated SMTP" / IMAP for your account
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
-# Fill in AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, USER_EMAIL
+```
+
+Edit `.env`:
+
+```
+OUTLOOK_EMAIL=you@company.com
+OUTLOOK_PASSWORD=your-app-password
+# IMAP_SERVER=outlook.office365.com   ← override if auto-detection fails
+EXCEL_FILE_PATH=./FundraisingTracker.xlsx
 ```
 
 ### 3. Install & run
@@ -38,30 +53,31 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open [http://localhost:5000](http://localhost:5000) → Sign in with Microsoft.
+Open **http://localhost:5000** in Chrome.
 
 ## Excel Workbook
 
-The workbook is created automatically at the path set in `EXCEL_FILE_PATH` (default: `/Documents/FundraisingTracker.xlsx` on your OneDrive).
+The file is created automatically at `EXCEL_FILE_PATH`.  
+To share it with colleagues, point `EXCEL_FILE_PATH` to a shared network drive.
 
 | Sheet | Columns |
 |---|---|
 | **Companies** | Company, Contact Name, Contact Email, Status, Last Email Date, Mandate Type, AUM (M€), Notes, First Contact Date, Updated |
-| **Email Log** | Date, Company, Contact, Direction (IN/OUT), Subject, Preview, Conversation ID |
+| **Email Log** | Date, Company, Contact, Direction (IN/OUT), Subject, Preview, Message-ID |
 
-Status colours are applied automatically (green = active, red = lost, etc.).
+Status colours are applied automatically.
 
 ## Pipeline Statuses
 
 | Status | Meaning |
 |---|---|
 | Initial Contact | First outreach sent |
-| In Discussion | Active conversation ongoing |
-| Proposal Sent | Mandate proposal / deck delivered |
-| Due Diligence | Company is reviewing / doing DD |
+| In Discussion | Active conversation |
+| Proposal Sent | Mandate proposal delivered |
+| Due Diligence | Company is doing DD |
 | Mandate Received | Mandate confirmed |
-| Follow Up | Waiting for response |
-| On Hold | Paused by either side |
+| Follow Up | Waiting for reply |
+| On Hold | Paused |
 | Not Interested | Declined |
 | Closed – Won | Mandate executed |
 | Closed – Lost | Deal did not close |

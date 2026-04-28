@@ -135,10 +135,16 @@
       These values are read from your <code>.env</code> file. Edit <code>.env</code> and
       restart the server to change credentials permanently.
     </p>
-    <div style="background:#f7f9fc;border:1px solid #e0e4ea;border-radius:8px;padding:16px;font-size:13px">
-      <div style="margin-bottom:8px"><strong>Email:</strong> <span id="settings-email"></span></div>
-      <div style="margin-bottom:8px"><strong>IMAP server:</strong> auto-detected from domain</div>
+    <div style="background:#f7f9fc;border:1px solid #e0e4ea;border-radius:8px;padding:16px;font-size:13px;line-height:1.8">
+      <div><strong>Email:</strong> <span id="settings-email"></span></div>
+      <div><strong>IMAP server:</strong> <span id="settings-imap"></span></div>
       <div><strong>Excel file:</strong> <span id="settings-excel" style="word-break:break-all"></span></div>
+    </div>
+    <div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:14px;font-size:12px;margin-top:14px;line-height:1.6">
+      <strong>GoDaddy-hosted email?</strong> Add this line to your <code>.env</code> and restart:<br>
+      <code>IMAP_SERVER=imap.secureserver.net</code><br><br>
+      <strong>Microsoft 365 through GoDaddy?</strong> Use:<br>
+      <code>IMAP_SERVER=outlook.office365.com</code>
     </div>
     <div id="conn-test-result" style="margin-top:14px;font-size:13px"></div>
     <div class="modal-actions">

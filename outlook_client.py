@@ -8,14 +8,18 @@ import re
 
 from config.settings import OUTLOOK_EMAIL, OUTLOOK_PASSWORD, IMAP_SERVER, IMAP_PORT
 
-# Known Outlook IMAP servers keyed by email domain
+# Known IMAP servers keyed by email domain
 _IMAP_SERVERS = {
-    "outlook.com":  "imap-mail.outlook.com",
-    "hotmail.com":  "imap-mail.outlook.com",
-    "live.com":     "imap-mail.outlook.com",
-    "msn.com":      "imap-mail.outlook.com",
+    # Microsoft personal
+    "outlook.com":   "imap-mail.outlook.com",
+    "hotmail.com":   "imap-mail.outlook.com",
+    "live.com":      "imap-mail.outlook.com",
+    "msn.com":       "imap-mail.outlook.com",
+    # GoDaddy Workspace Email (any custom domain hosted by GoDaddy)
+    # Set IMAP_SERVER=imap.secureserver.net in .env for GoDaddy-hosted domains
 }
-_M365_DEFAULT = "outlook.office365.com"
+_M365_DEFAULT   = "outlook.office365.com"
+_GODADDY_SERVER = "imap.secureserver.net"
 
 # Candidate folder names for Sent Items (Outlook uses localised names)
 _SENT_CANDIDATES = ['"Sent Items"', "Sent", '"Sent Mail"']

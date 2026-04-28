@@ -19,6 +19,7 @@ def api_status():
     return jsonify({
         "configured":  bool(OUTLOOK_EMAIL),
         "email":       OUTLOOK_EMAIL,
+        "imap_server": _imap._server,
         "excel_path":  xl.get_excel_path(),
     })
 

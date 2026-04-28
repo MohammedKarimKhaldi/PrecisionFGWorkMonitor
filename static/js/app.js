@@ -388,10 +388,10 @@ async function submitStatusChange() {
 function openSettingsModal() {
   document.getElementById('modal-settings').style.display = 'flex';
   document.getElementById('conn-test-result').textContent = '';
-  fetch('/api/excel/download', { method: 'HEAD' });  // warm up path
-  // Show Excel path from a separate call
   fetch('/api/status').then(r => r.json()).then(d => {
-    document.getElementById('settings-excel').textContent = d.excel_path || '';
+    document.getElementById('settings-email').textContent      = d.email      || '—';
+    document.getElementById('settings-imap').textContent       = d.imap_server || '—';
+    document.getElementById('settings-excel').textContent      = d.excel_path  || '—';
   }).catch(() => {});
 }
 function closeSettingsModal() { document.getElementById('modal-settings').style.display = 'none'; }

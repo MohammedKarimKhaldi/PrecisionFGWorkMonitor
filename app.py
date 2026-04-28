@@ -6,7 +6,7 @@ from flask_cors import CORS
 
 import excel_manager as xl
 from outlook_mac_client import OutlookMacClient, group_messages_by_domain, parse_email_address
-from config.settings import FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL, EXCEL_FILE_PATH
+from config.settings import FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL, EXCEL_FILE_PATH, OLLAMA_HOST, OLLAMA_MODEL
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -47,6 +47,13 @@ def api_status():
 @app.route("/api/test-connection")
 def test_connection():
     ok, msg = _outlook.test_connection()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/test-ollama")
+def test_ollama():
+    from ai_classifier import test_ollama as _test
+    ok, msg = _test()
     return jsonify({"ok": ok, "message": msg})
 
 # ── Emails ─────────────────────────────────────────────────────────────────
@@ -224,6 +231,14 @@ def download_excel():
 @app.route("/api/statuses")
 def get_statuses():
     return jsonify({"statuses": MANDATE_STATUSES})
+
+
+@app.route("/api/config")
+def get_config():
+    return jsonify({
+        "ollama_host":  OLLAMA_HOST,
+        "ollama_model": OLLAMA_MODEL,
+    })
 
 
 @app.route("/")

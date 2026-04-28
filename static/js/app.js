@@ -387,18 +387,24 @@ async function submitStatusChange() {
 // ── Settings modal ─────────────────────────────────────────────────────────
 function openSettingsModal() {
   document.getElementById('modal-settings').style.display = 'flex';
-  document.getElementById('conn-test-result').textContent = '';
-  fetch('/api/status').then(r => r.json()).then(d => {
-    document.getElementById('settings-email').textContent      = d.email      || '—';
-    document.getElementById('settings-imap').textContent       = d.imap_server || '—';
-    document.getElementById('settings-excel').textContent      = d.excel_path  || '—';
+  document.getElementById('conn-test-result').textContent   = '';
+  document.getElementById('ollama-test-result').textContent = '';
+  Promise.all([
+    fetch('/api/status').then(r => r.json()),
+    fetch('/api/config').then(r => r.json()),
+  ]).then(([d, cfg]) => {
+    document.getElementById('settings-email').textContent       = d.email       || '—';
+    document.getElementById('settings-imap').textContent        = d.imap_server  || '—';
+    document.getElementById('settings-excel').textContent       = d.excel_path   || '—';
+    document.getElementById('settings-ollama-host').textContent  = cfg.ollama_host  || '—';
+    document.getElementById('settings-ollama-model').textContent = cfg.ollama_model || '—';
   }).catch(() => {});
 }
 function closeSettingsModal() { document.getElementById('modal-settings').style.display = 'none'; }
 
 async function testConnection() {
   const el = document.getElementById('conn-test-result');
-  el.textContent = 'Testing…';
+  el.textContent = 'Testing Outlook…';
   try {
     const d = await API.get('/api/test-connection');
     if (d.ok) {
@@ -408,7 +414,26 @@ async function testConnection() {
     } else {
       el.style.color = '#c62828';
       el.textContent = '✗ ' + d.message;
-      setConnBadge('error', '● IMAP error');
+      setConnBadge('error', '● disconnected');
+    }
+  } catch (e) {
+    el.style.color = '#c62828';
+    el.textContent = '✗ ' + e.message;
+  }
+}
+
+async function testOllama() {
+  const el = document.getElementById('ollama-test-result');
+  el.style.color   = '#555';
+  el.textContent   = 'Testing Ollama…';
+  try {
+    const d = await API.get('/api/test-ollama');
+    if (d.ok) {
+      el.style.color = '#2e7d32';
+      el.textContent = '✓ ' + d.message;
+    } else {
+      el.style.color = '#c62828';
+      el.textContent = '✗ ' + d.message;
     }
   } catch (e) {
     el.style.color = '#c62828';

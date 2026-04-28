@@ -1,90 +1,98 @@
-"""AI-powered deal classification using Claude API (claude-opus-4-7)."""
+"""AI-powered deal classification using a local Ollama model.
+Runs entirely on your machine — no data sent anywhere.
+Install: https://ollama.ai  then  `ollama pull llama3.2`
+"""
 import json
-import anthropic
-from config.settings import ANTHROPIC_API_KEY, MANDATE_STATUSES
-
-_client = None
-
-
-def _get_client():
-    global _client
-    if _client is None:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Add it to your .env file."
-            )
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
-
+import urllib.request
+import urllib.error
+from config.settings import OLLAMA_HOST, OLLAMA_MODEL, MANDATE_STATUSES
 
 _STATUSES_LIST = "\n".join(f"  - {s}" for s in MANDATE_STATUSES)
 
 _SYSTEM_PROMPT = f"""You are an expert fundraising analyst for a hedge fund.
-You analyse email threads between a fundraiser and potential institutional investors/allocators.
-Extract structured deal information from the email data provided.
+Analyse email threads between a fundraiser and potential institutional investors/allocators.
+Extract structured deal information and return ONLY a valid JSON object — no markdown, no explanation.
 
-Pipeline statuses (use exactly one):
+JSON fields:
+  "Company"       : full institution name (infer from domain if needed, e.g. amundi.com → Amundi Asset Management)
+  "Contact Name"  : primary contact's full name
+  "Contact Email" : primary contact's email address
+  "Status"        : exactly one of the statuses listed below
+  "Mandate Type"  : e.g. "Equity Long/Short", "Global Macro", "Fixed Income" — omit if unknown
+  "AUM (M€)"      : number in millions of euros — omit if not mentioned
+  "Notes"         : 1-2 sentences on current relationship status and next steps
+
+Pipeline statuses:
 {_STATUSES_LIST}
 
-Guidelines:
-- "Company" should be the full institution name, not just the email domain.
-  Infer it from the sender name, subject lines, or domain (e.g. amundi.com → Amundi Asset Management).
-- "Contact Name" / "Contact Email": primary point of contact (most frequent or most senior).
-- "Status": pick the stage that best reflects the latest interaction.
-  • No reply / single intro email → "Initial Contact"
-  • Back-and-forth exchange → "In Discussion"
-  • Proposal / deck sent → "Proposal Sent"
-  • Requesting data, DDQ, references → "Due Diligence"
-  • Mandate confirmed → "Mandate Received"
-  • Awaiting next meeting / nudging → "Follow Up"
-- "Mandate Type": e.g. "Equity Long/Short", "Global Macro", "Fixed Income Relative Value".
-  Use null if unknown.
-- "AUM (M€)": a number in millions of euros if mentioned, otherwise omit the field.
-- "Notes": 1-2 sentence summary of where the relationship stands and any next steps.
+Status selection guide:
+  single intro / no reply yet → "Initial Contact"
+  back-and-forth emails       → "In Discussion"
+  pitch deck / proposal sent  → "Proposal Sent"
+  DDQ / data request          → "Due Diligence"
+  mandate confirmed           → "Mandate Received"
+  waiting / nudging           → "Follow Up"
 
-Return ONLY a valid JSON object — no markdown, no explanation."""
+Return ONLY the JSON object. No prose, no markdown fences."""
+
+
+def _call_ollama(prompt: str) -> str:
+    payload = json.dumps({
+        "model":  OLLAMA_MODEL,
+        "format": "json",
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
+    }).encode()
+
+    url = f"{OLLAMA_HOST.rstrip('/')}/api/chat"
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read())
+            return body["message"]["content"]
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {OLLAMA_HOST}. "
+            "Make sure it is running (`ollama serve`) and that you have pulled a model "
+            f"(`ollama pull {OLLAMA_MODEL}`)."
+        ) from e
 
 
 def classify_domain_emails(domain: str, emails: list, contacts: list) -> dict:
-    """Send an email group to Claude and return a structured deal dict."""
+    """Classify a domain's email group and return a structured deal dict."""
     lines = []
     for em in sorted(emails, key=lambda e: e.get("receivedDateTime", ""), reverse=True)[:25]:
         ea = (em.get("from") or {}).get("emailAddress", {})
         from_str = f"{ea.get('name', '')} <{ea.get('address', '')}>".strip(" <>")
-        date = (em.get("receivedDateTime") or "")[:10]
+        date    = (em.get("receivedDateTime") or "")[:10]
         subject = em.get("subject") or "(no subject)"
         preview = (em.get("bodyPreview") or "").strip()
-        folder = em.get("folder", "")
+        folder  = em.get("folder", "")
         line = f"[{date}] [{folder}] From: {from_str}\nSubject: {subject}"
         if preview:
             line += f"\nPreview: {preview[:180]}"
         lines.append(line)
 
-    emails_text = "\n\n---\n\n".join(lines) if lines else "No emails available."
+    emails_text   = "\n\n---\n\n".join(lines) if lines else "No emails available."
     contacts_text = ", ".join(contacts) if contacts else "unknown"
 
-    user_msg = (
-        f'Domain: {domain}\n'
-        f'Known contacts: {contacts_text}\n'
-        f'Email count: {len(emails)}\n\n'
-        f'EMAIL THREAD (most recent first):\n{emails_text}\n\n'
-        f'Return a JSON object classifying this deal.'
+    prompt = (
+        f"Domain: {domain}\n"
+        f"Known contacts: {contacts_text}\n"
+        f"Email count: {len(emails)}\n\n"
+        f"EMAIL THREAD (most recent first):\n{emails_text}\n\n"
+        f"Return a JSON object classifying this deal."
     )
 
-    response = _get_client().messages.create(
-        model="claude-opus-4-7",
-        max_tokens=512,
-        system=[
-            {
-                "type": "text",
-                "text": _SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": user_msg}],
-    )
+    raw = _call_ollama(prompt).strip()
 
-    raw = response.content[0].text.strip()
+    # Strip markdown fences if the model added them despite instructions
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -103,3 +111,22 @@ def classify_domain_emails(domain: str, emails: list, contacts: list) -> dict:
             del result["AUM (M€)"]
 
     return result
+
+
+def test_ollama() -> tuple[bool, str]:
+    """Quick connectivity check — returns (ok, message)."""
+    try:
+        url = f"{OLLAMA_HOST.rstrip('/')}/api/tags"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+            models = [m["name"] for m in data.get("models", [])]
+            if not models:
+                return False, f"Ollama is running but no models pulled. Run: ollama pull {OLLAMA_MODEL}"
+            if not any(OLLAMA_MODEL.split(":")[0] in m for m in models):
+                return False, (f"Model '{OLLAMA_MODEL}' not found. "
+                               f"Available: {', '.join(models)}. "
+                               f"Run: ollama pull {OLLAMA_MODEL}")
+            return True, f"Ollama ready — model: {OLLAMA_MODEL} | available: {', '.join(models)}"
+    except Exception as e:
+        return False, (f"Cannot reach Ollama at {OLLAMA_HOST}. "
+                       f"Install from https://ollama.ai and run: ollama serve && ollama pull {OLLAMA_MODEL}")

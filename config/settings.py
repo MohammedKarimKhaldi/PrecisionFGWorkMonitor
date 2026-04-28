@@ -8,9 +8,11 @@ OUTLOOK_PASSWORD = os.environ.get("OUTLOOK_PASSWORD", "")
 IMAP_SERVER      = os.environ.get("IMAP_SERVER", "")  # auto-detected if blank
 IMAP_PORT        = 993
 
-EXCEL_FILE_PATH   = os.environ.get("EXCEL_FILE_PATH", "./FundraisingTracker.xlsx")
-FLASK_SECRET_KEY  = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+EXCEL_FILE_PATH  = os.environ.get("EXCEL_FILE_PATH", "./FundraisingTracker.xlsx")
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key")
+
+OLLAMA_HOST  = os.environ.get("OLLAMA_HOST",  "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
 MANDATE_STATUSES = [
     "Initial Contact",

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PrecisionFG – Fundraising Monitor</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+<!-- Login overlay -->
+<div id="login-overlay" class="login-overlay" style="display:none">
+  <div class="login-box">
+    <h1>PrecisionFG<br>Fundraising Monitor</h1>
+    <p>Sign in with your Microsoft / Outlook account to load your emails and track mandates.</p>
+    <a id="login-btn" href="/auth/login" class="btn btn-primary" style="display:inline-block;text-decoration:none">
+      Sign in with Microsoft
+    </a>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Main shell -->
+<div class="app-shell">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <span class="logo">PrecisionFG · Fundraising Monitor</span>
+    <span class="spacer"></span>
+    <span class="user-info" id="user-info"></span>
+    <button class="btn btn-outline btn-sm" style="color:#fff;border-color:rgba(255,255,255,0.4)" onclick="window.location='/auth/logout'">Sign out</button>
+  </header>
+
+  <div class="main-area">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-title">Companies</div>
+      <div class="sidebar-list" id="sidebar-list">
+        <div class="empty-state" style="padding:20px;font-size:12px">Loading…</div>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="content">
+
+      <!-- Stats -->
+      <div class="stats-bar" id="stats-bar"></div>
+
+      <!-- Action bar -->
+      <div class="card">
+        <div class="card-body" style="padding:14px 20px">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary" onclick="openAddModal()">+ Add Company</button>
+            <button class="btn btn-outline" id="refresh-btn" onclick="refreshAll()">Refresh</button>
+            <button class="btn btn-outline" onclick="downloadExcel()">⬇ Download Excel</button>
+            <div class="search-bar" style="margin-left:auto">
+              <input id="search-input" type="search" placeholder="Search companies…" oninput="onSearch()" style="width:220px" />
+              <select id="filter-status" onchange="onFilterChange()" style="width:160px">
+                <option value="">All Statuses</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Companies table -->
+      <div class="card">
+        <div class="card-header">
+          <h2>Pipeline</h2>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>Contact</th>
+                <th>Status</th>
+                <th>Last Email</th>
+                <th>Mandate Type</th>
+                <th>AUM</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="companies-tbody">
+              <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Company detail panel -->
+      <div class="card" id="company-detail" style="display:none">
+        <div class="card-header">
+          <h2 id="detail-title">Company</h2>
+          <span id="detail-status"></span>
+          <button class="btn btn-outline btn-sm" id="detail-edit-btn">Edit</button>
+          <button class="btn btn-primary btn-sm" id="detail-status-btn">Change Status</button>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:20px">
+            <div>
+              <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">Contact</div>
+              <div id="detail-contact" style="font-size:13px"></div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">Mandate Type</div>
+              <div id="detail-mandate" style="font-size:13px"></div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">AUM</div>
+              <div id="detail-aum" style="font-size:13px"></div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">First Contact</div>
+              <div id="detail-first" style="font-size:13px"></div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">Last Email</div>
+              <div id="detail-last" style="font-size:13px"></div>
+            </div>
+          </div>
+          <div style="margin-bottom:20px">
+            <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:4px">Notes</div>
+            <div id="detail-notes" style="font-size:13px;white-space:pre-wrap"></div>
+          </div>
+          <!-- Email thread -->
+          <div style="font-size:11px;color:#888;text-transform:uppercase;font-weight:600;margin-bottom:10px">Email Thread</div>
+          <div id="emails-panel"></div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- ── Modal: Add Company ── -->
+<div id="modal-add" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddModal()">
+  <div class="modal-box">
+    <h3>Add Company</h3>
+    <form id="form-add" onsubmit="event.preventDefault();submitAddCompany()">
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label>Company Name *</label>
+          <input name="company" required placeholder="e.g. Amundi Asset Management" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Contact Name</label>
+          <input name="contact_name" placeholder="Jean Dupont" />
+        </div>
+        <div class="form-group">
+          <label>Contact Email</label>
+          <input name="contact_email" type="email" placeholder="j.dupont@company.com" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Status</label>
+          <select name="status" id="add-status"></select>
+        </div>
+        <div class="form-group">
+          <label>Mandate Type</label>
+          <input name="mandate_type" placeholder="e.g. Equity Long/Short" />
+        </div>
+        <div class="form-group" style="flex:0.5">
+          <label>AUM (M€)</label>
+          <input name="aum" type="number" placeholder="500" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea name="notes" rows="3" placeholder="Internal notes…"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-outline" onclick="closeAddModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save to Excel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── Modal: Edit Company ── -->
+<div id="modal-edit" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
+  <div class="modal-box">
+    <h3>Edit Company</h3>
+    <form id="form-edit" onsubmit="event.preventDefault();submitEditCompany()">
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label>Company Name *</label>
+          <input name="company" required />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Contact Name</label>
+          <input name="contact_name" />
+        </div>
+        <div class="form-group">
+          <label>Contact Email</label>
+          <input name="contact_email" type="email" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Status</label>
+          <select name="status"></select>
+        </div>
+        <div class="form-group">
+          <label>Mandate Type</label>
+          <input name="mandate_type" />
+        </div>
+        <div class="form-group" style="flex:0.5">
+          <label>AUM (M€)</label>
+          <input name="aum" type="number" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea name="notes" rows="3"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-outline" onclick="closeEditModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save to Excel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── Modal: Change Status ── -->
+<div id="modal-status" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeStatusModal()">
+  <div class="modal-box" style="width:380px">
+    <h3>Update Status</h3>
+    <p style="font-size:13px;color:#555;margin-bottom:16px">Company: <strong id="status-company-name"></strong></p>
+    <input type="hidden" id="status-company-hidden" />
+    <div class="form-group" style="margin-bottom:16px">
+      <label>New Status</label>
+      <select id="status-select"></select>
+    </div>
+    <div class="form-group" style="margin-bottom:4px">
+      <label>Notes (optional)</label>
+      <textarea id="status-notes" rows="3" placeholder="What happened? Next steps?"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeStatusModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitStatusChange()">Update</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

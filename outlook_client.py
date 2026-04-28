@@ -95,6 +95,19 @@ def _parse_message(raw_bytes):
     }
 
 
+def _auth_hint(error_msg: str) -> str:
+    msg = error_msg.lower()
+    if "authenticationfailed" in msg or "login failed" in msg or "invalid credentials" in msg:
+        return (
+            " — Troubleshooting: "
+            "(1) Double-check the password in .env. "
+            "(2) GoDaddy: log into your GoDaddy control panel → Email & Office → your mailbox → Settings and confirm IMAP is enabled. "
+            "(3) If your account has 2-factor authentication, you must create an App Password and use that instead of your regular password. "
+            "(4) Try logging into webmail.secureserver.net with the same credentials to confirm they work."
+        )
+    return ""
+
+
 class OutlookIMAPClient:
     def __init__(self):
         self._server = _detect_server(OUTLOOK_EMAIL)
@@ -102,9 +115,20 @@ class OutlookIMAPClient:
 
     # ── Connection ────────────────────────────────────────────────────────
 
+    def _authenticate(self):
+        """Try LOGIN first, then AUTHENTICATE PLAIN as fallback (needed by some GoDaddy configs)."""
+        try:
+            self._conn.login(OUTLOOK_EMAIL, OUTLOOK_PASSWORD)
+        except imaplib.IMAP4.error:
+            # AUTHENTICATE PLAIN: "\0user\0password" base64-encoded
+            self._conn.authenticate(
+                "PLAIN",
+                lambda _: f"\0{OUTLOOK_EMAIL}\0{OUTLOOK_PASSWORD}".encode(),
+            )
+
     def connect(self):
         self._conn = imaplib.IMAP4_SSL(self._server, IMAP_PORT)
-        self._conn.login(OUTLOOK_EMAIL, OUTLOOK_PASSWORD)
+        self._authenticate()
         return self
 
     def disconnect(self):
@@ -120,9 +144,13 @@ class OutlookIMAPClient:
         try:
             self.connect()
             self.disconnect()
-            return True, "Connected successfully"
+            return True, f"Connected to {self._server}"
         except imaplib.IMAP4.error as e:
-            return False, str(e)
+            msg = str(e)
+            hint = _auth_hint(msg)
+            return False, f"{msg}{hint}"
+        except OSError as e:
+            return False, f"Cannot reach {self._server}: {e}"
         except Exception as e:
             return False, str(e)
 

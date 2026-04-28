@@ -1,32 +1,32 @@
-"""Flask backend — reads Outlook via IMAP, stores pipeline in local Excel."""
+"""Flask backend — reads Outlook via macOS JXA, stores pipeline in local Excel."""
 from flask import Flask, jsonify, request, send_file, render_template
 from flask_cors import CORS
 
 import excel_manager as xl
-from outlook_client import OutlookIMAPClient, group_messages_by_domain
+from outlook_mac_client import OutlookMacClient, group_messages_by_domain
 from config.settings import FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL, EXCEL_FILE_PATH
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
 CORS(app)
 
-_imap = OutlookIMAPClient()
+_outlook = OutlookMacClient()
 
-# ── Health / connection check ──────────────────────────────────────────────
+# ── Status ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/status")
 def api_status():
     return jsonify({
-        "configured":  bool(OUTLOOK_EMAIL),
+        "configured":  True,
         "email":       OUTLOOK_EMAIL,
-        "imap_server": _imap._server,
+        "imap_server": _outlook._server,
         "excel_path":  xl.get_excel_path(),
     })
 
 
 @app.route("/api/test-connection")
 def test_connection():
-    ok, msg = _imap.test_connection()
+    ok, msg = _outlook.test_connection()
     return jsonify({"ok": ok, "message": msg})
 
 # ── Emails ─────────────────────────────────────────────────────────────────
@@ -34,15 +34,9 @@ def test_connection():
 @app.route("/api/emails")
 def get_emails():
     try:
-        folder = request.args.get("folder", "all")
-        limit  = int(request.args.get("top", 150))
-        if folder == "inbox":
-            messages = _imap.get_inbox(limit)
-        elif folder == "sent":
-            messages = _imap.get_sent(limit)
-        else:
-            messages = _imap.get_all_messages(limit)
-        grouped = group_messages_by_domain(messages)
+        limit    = int(request.args.get("top", 150))
+        messages = _outlook.get_all_messages(limit)
+        grouped  = group_messages_by_domain(messages)
         return jsonify({"messages": messages[:60], "grouped": grouped})
     except Exception as e:
         return jsonify({"error": str(e), "messages": [], "grouped": []}), 500
@@ -54,10 +48,19 @@ def search_emails():
     if not query:
         return jsonify({"error": "query required"}), 400
     try:
-        messages = _imap.search_messages(query)
+        messages = _outlook.search_messages(query)
         return jsonify({"messages": messages})
     except Exception as e:
         return jsonify({"error": str(e), "messages": []}), 500
+
+
+@app.route("/api/folders")
+def list_folders():
+    try:
+        folders = _outlook.get_folders()
+        return jsonify({"folders": folders})
+    except Exception as e:
+        return jsonify({"error": str(e), "folders": []}), 500
 
 # ── Companies ──────────────────────────────────────────────────────────────
 
@@ -96,8 +99,8 @@ def update_status(company_name):
 
 @app.route("/api/companies/<company_name>/log-emails", methods=["POST"])
 def log_company_emails(company_name):
-    data = request.get_json()
-    emails = data.get("emails", [])
+    data    = request.get_json()
+    emails  = data.get("emails", [])
     try:
         added = xl.log_emails(emails, company_name)
         return jsonify({"added": added})
@@ -109,9 +112,8 @@ def log_company_emails(company_name):
 @app.route("/api/excel/download")
 def download_excel():
     try:
-        path = xl.get_excel_path()
         return send_file(
-            path,
+            xl.get_excel_path(),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
             download_name="FundraisingTracker.xlsx",

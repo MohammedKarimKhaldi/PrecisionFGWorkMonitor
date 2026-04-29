@@ -50,6 +50,12 @@ def test_connection():
     return jsonify({"ok": ok, "message": msg})
 
 
+@app.route("/api/debug-outlook")
+def debug_outlook():
+    """Raw JXA diagnostic — visit this URL to see exactly what Outlook exposes."""
+    return jsonify(_outlook.raw_diagnostic())
+
+
 @app.route("/api/test-ollama")
 def test_ollama():
     from ai_classifier import test_ollama as _test

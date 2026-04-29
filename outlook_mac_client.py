@@ -23,55 +23,94 @@ def _run_jxa(script: str, timeout: int = 90) -> any:
     return json.loads(out)
 
 
-# ── JXA Scripts ───────────────────────────────────────────────────────────
+# ── Shared JXA helpers ────────────────────────────────────────────────────
 #
-# Folder detection is language-aware: Outlook on a French Mac names folders
-# "Boîte de réception" and "Éléments envoyés".  We match by substring so the
-# same code works for English, French, Spanish, German, Italian and Portuguese.
-#
-# Fetch strategy:
-#   1. app.inbox shortcut (may be empty on some versions — try anyway)
-#   2. Recursive scan of app.mailFolders() — always works, language-aware
-#   (app.accounts() is NOT used: it throws "Message incompréhensible" on
-#    French Outlook for Mac and is therefore unreliable.)
+# Folder name detection is language-aware.
+# "Boîte de réception" → isInbox,  "Éléments envoyés" → isSent.
 
 _FOLDER_HELPERS = """\
-    // Returns true for any localised "Inbox" folder name.
     function isInbox(name) {
         var n = name.toLowerCase();
         return n === 'inbox'
-            || n.indexOf('réception') >= 0   // Boîte de réception (FR)
-            || n.indexOf('reception') >= 0    // Boite de reception (FR no accent)
-            || n === 'bandeja de entrada'     // ES
-            || n === 'posteingang'            // DE
-            || n === 'posta in arrivo'        // IT
-            || n === 'caixa de entrada'       // PT
-            || n === 'postvak in'             // NL
-            || n === 'ontvangen';
+            || n.indexOf('réception') >= 0 || n.indexOf('reception') >= 0
+            || n === 'bandeja de entrada' || n === 'posteingang'
+            || n === 'posta in arrivo'    || n === 'caixa de entrada'
+            || n === 'postvak in'         || n === 'ontvangen';
     }
-
-    // Returns true for any localised "Sent Items" folder name.
     function isSent(name) {
         var n = name.toLowerCase();
         return n === 'sent items' || n === 'sent mail' || n === 'sent'
-            || n.indexOf('envoy')   >= 0   // Éléments envoyés / Envoyés (FR)
-            || n === 'elementos enviados'  // ES
-            || n === 'enviados'            // ES short
-            || n === 'gesendete elemente'  // DE
-            || n === 'gesendet'            // DE short
-            || n === 'posta inviata'       // IT
-            || n === 'itens enviados'      // PT
-            || n === 'verzonden items'     // NL
-            || n === 'verzonden';
+            || n.indexOf('envoy') >= 0
+            || n === 'elementos enviados' || n === 'enviados'
+            || n === 'gesendete elemente' || n === 'gesendet'
+            || n === 'posta inviata'      || n === 'itens enviados'
+            || n === 'verzonden items'    || n === 'verzonden';
     }
 """
 
+# ── Diagnostic test ───────────────────────────────────────────────────────
+#
+# Three distinct message-access methods are tested for every inbox/sent folder:
+#   A) .messages.length   – JXA specifier (often 0 even when messages exist)
+#   B) .messages().length – materialised array (the correct count)
+#   C) .messages[0].subject() – indexed access (works on some Outlook builds
+#      where the array materialisation is broken)
+#
+# This tells us exactly which path works so we can fix the fetch accordingly.
+
+_SCRIPT_TEST = """\
+(function() {
+    try {
+        var app = Application('Microsoft Outlook');
+        var report = { ok: true, folders: [] };
+
+FOLDER_HELPERS
+
+        function probe(folder) {
+            var r = {};
+            try { r.specLen  = folder.messages.length;    } catch(e) { r.specErr   = e.message; }
+            try { r.arrayLen = folder.messages().length;  } catch(e) { r.arrayErr  = e.message; }
+            try { folder.messages[0].subject(); r.idx0ok = true; } catch(e) { r.idx0err = e.message; }
+            return r;
+        }
+
+        try { var ai = probe(app.inbox); ai.name = 'app.inbox'; report.folders.push(ai); } catch(e) {}
+
+        try {
+            var top = app.mailFolders();
+            report.topCount = top.length;
+            for (var i = 0; i < top.length; i++) {
+                try {
+                    var n = top[i].name();
+                    if (!isInbox(n) && !isSent(n)) continue;
+                    var p = probe(top[i]);
+                    p.name = n;
+                    p.kind = isInbox(n) ? 'INBOX' : 'SENT';
+                    report.folders.push(p);
+                } catch(e) {}
+            }
+        } catch(e) { report.topErr = e.message; }
+
+        return JSON.stringify(report);
+    } catch(e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+})()
+""".replace("FOLDER_HELPERS", _FOLDER_HELPERS)
+
+# ── Header fetch ──────────────────────────────────────────────────────────
+#
+# fetchFolder tries three access methods in order:
+#   1) messages() – normal array materialisation
+#   2) index walk  – for Outlook builds where .messages() materialises to []
+#                    but .messages[n] still works (iterate until out-of-bounds)
+
 _SCRIPT_GET_HEADERS = """\
 (function() {
-    var app = Application('Microsoft Outlook');
-    var result  = [];
-    var seen    = {};
-    var limit   = LIMIT;
+    var app      = Application('Microsoft Outlook');
+    var result   = [];
+    var seen     = {};
+    var limit    = LIMIT;
     var cutoffMs = Date.now() - MONTHS * 30 * 24 * 60 * 60 * 1000;
 
 FOLDER_HELPERS
@@ -102,16 +141,28 @@ FOLDER_HELPERS
     }
 
     function fetchFolder(folder, label) {
+        // Method 1: materialised array
         try {
-            var msgs  = folder.messages();
-            var total = msgs.length;
-            if (total === 0) return;
-            var start = Math.max(0, total - limit);
-            for (var i = total - 1; i >= start; i--) { addMsg(msgs[i], label); }
+            var msgs = folder.messages();
+            if (msgs && msgs.length > 0) {
+                var start = Math.max(0, msgs.length - limit);
+                for (var i = msgs.length - 1; i >= start; i--) { addMsg(msgs[i], label); }
+                return;
+            }
         } catch(e) {}
+
+        // Method 2: index walk (handles builds where .messages() returns [])
+        var consec = 0;
+        for (var idx = 0; idx < limit; idx++) {
+            try {
+                addMsg(folder.messages[idx], label);
+                consec = 0;
+            } catch(e) {
+                if (++consec >= 5) break;   // 5 consecutive misses = end of folder
+            }
+        }
     }
 
-    // Recurse into every sub-folder looking for more inbox/sent folders.
     function walkFolders(parent) {
         var sub;
         try { sub = parent.mailFolders(); } catch(e) { return; }
@@ -125,10 +176,7 @@ FOLDER_HELPERS
         }
     }
 
-    // 1. app.inbox shortcut
     try { fetchFolder(app.inbox, 'Inbox'); } catch(e) {}
-
-    // 2. Full recursive scan of all top-level folders (language-aware)
     try {
         var top = app.mailFolders();
         for (var k = 0; k < top.length; k++) {
@@ -146,12 +194,14 @@ FOLDER_HELPERS
 })()
 """.replace("FOLDER_HELPERS", _FOLDER_HELPERS)
 
+# ── Search ────────────────────────────────────────────────────────────────
+
 _SCRIPT_SEARCH = """\
 (function() {
-    var app   = Application('Microsoft Outlook');
-    var query = QUERY_JSON;
-    var result = [];
-    var seen   = {};
+    var app      = Application('Microsoft Outlook');
+    var query    = QUERY_JSON;
+    var result   = [];
+    var seen     = {};
     var cutoffMs = Date.now() - 365 * 24 * 60 * 60 * 1000;
 
 FOLDER_HELPERS
@@ -188,10 +238,19 @@ FOLDER_HELPERS
     }
 
     function searchFolder(folder, name) {
+        // Array access
         try {
             var msgs = folder.messages();
             for (var i = 0; i < msgs.length; i++) { matchMsg(msgs[i], name); }
         } catch(e) {}
+        // Index fallback
+        if (!result.length) {
+            var consec = 0;
+            for (var idx = 0; idx < 500; idx++) {
+                try { matchMsg(folder.messages[idx], name); consec = 0; }
+                catch(e) { if (++consec >= 5) break; }
+            }
+        }
         try {
             var sub = folder.mailFolders();
             for (var j = 0; j < sub.length; j++) {
@@ -213,6 +272,8 @@ FOLDER_HELPERS
 })()
 """.replace("FOLDER_HELPERS", _FOLDER_HELPERS)
 
+# ── Folder list ───────────────────────────────────────────────────────────
+
 _SCRIPT_LIST_FOLDERS = """\
 (function() {
     var app    = Application('Microsoft Outlook');
@@ -226,7 +287,9 @@ _SCRIPT_LIST_FOLDERS = """\
         if (seen[key]) return;
         seen[key] = true;
         var count = -1;
-        try { count = folder.messages.length; } catch(e) {}
+        try { count = folder.messages().length; } catch(e) {
+            try { count = folder.messages.length; } catch(e2) {}
+        }
         result.push({ name: n, depth: depth, count: count });
         try {
             var sub = folder.mailFolders();
@@ -245,54 +308,6 @@ _SCRIPT_LIST_FOLDERS = """\
     return JSON.stringify(result);
 })()
 """
-
-# Diagnostic: reports which top-level folders exist and whether each
-# matches the inbox/sent patterns, so we can verify language detection.
-_SCRIPT_TEST = """\
-(function() {
-    try {
-        var app = Application('Microsoft Outlook');
-        var report = { ok: true, folderMatches: [] };
-
-FOLDER_HELPERS
-
-        // Report what app.inbox sees
-        try {
-            report.appInboxCount = app.inbox.messages.length;
-        } catch(e) {
-            report.appInboxError = e.message;
-        }
-
-        // Show which top-level folders match inbox/sent patterns
-        var totalInbox = 0, totalSent = 0;
-        try {
-            var top = app.mailFolders();
-            report.topFolderCount = top.length;
-            for (var i = 0; i < top.length; i++) {
-                try {
-                    var n     = top[i].name();
-                    var count = -1;
-                    try { count = top[i].messages.length; } catch(e) {}
-                    var kind = isInbox(n) ? 'INBOX' : (isSent(n) ? 'SENT' : null);
-                    if (kind) {
-                        report.folderMatches.push({ name: n, kind: kind, count: count });
-                        if (kind === 'INBOX') totalInbox += (count > 0 ? count : 0);
-                        if (kind === 'SENT')  totalSent  += (count > 0 ? count : 0);
-                    }
-                } catch(e) {}
-            }
-        } catch(e) {
-            report.topFoldersError = e.message;
-        }
-
-        report.totalInboxMessages = totalInbox;
-        report.totalSentMessages  = totalSent;
-        return JSON.stringify(report);
-    } catch(e) {
-        return JSON.stringify({ ok: false, error: e.message });
-    }
-})()
-""".replace("FOLDER_HELPERS", _FOLDER_HELPERS)
 
 
 # ── Conversion ────────────────────────────────────────────────────────────
@@ -323,31 +338,61 @@ class OutlookMacClient:
 
     def test_connection(self) -> tuple[bool, str]:
         try:
-            data = _run_jxa(_SCRIPT_TEST, timeout=20)
+            data = _run_jxa(_SCRIPT_TEST, timeout=25)
             if not isinstance(data, dict) or not data.get("ok"):
                 err = data.get("error", "Outlook not accessible") if isinstance(data, dict) else "No response"
                 return False, err
 
-            matches = data.get("folderMatches", [])
-            inbox_total = data.get("totalInboxMessages", 0)
-            sent_total  = data.get("totalSentMessages", 0)
+            folders = data.get("folders", [])
+            if not folders:
+                return False, (
+                    f"Outlook is running but no inbox/sent folders matched. "
+                    f"Top-level folder count: {data.get('topCount', '?')}"
+                )
 
-            if not matches:
-                top_n = data.get("topFolderCount", 0)
-                app_n = data.get("appInboxCount", 0)
-                hint  = f"app.inbox={app_n}, {top_n} top-level folders found but none matched inbox/sent patterns"
-                return False, f"0 messages — {hint}"
+            parts = []
+            any_accessible = False
+            for f in folders:
+                name = f.get("name", "?")
+                array_len = f.get("arrayLen")
+                spec_len  = f.get("specLen")
+                idx_ok    = f.get("idx0ok", False)
 
-            parts = [f"{m['name']} ({m['count']})" for m in matches]
-            total = inbox_total + sent_total
-            return True, (
-                f"{total} messages visible — matched: {', '.join(parts)}"
-            )
+                if array_len is not None and array_len > 0:
+                    parts.append(f"{name}: {array_len} msgs (array ✓)")
+                    any_accessible = True
+                elif idx_ok:
+                    parts.append(f"{name}: array=0 but index access ✓")
+                    any_accessible = True
+                elif spec_len is not None and spec_len > 0:
+                    parts.append(f"{name}: {spec_len} msgs (specifier only)")
+                    any_accessible = True
+                else:
+                    arr_err = f.get("arrayErr", "")
+                    idx_err = f.get("idx0err", "")
+                    parts.append(f"{name}: 0 — array err: {arr_err or 'empty'}, idx err: {idx_err or 'empty'}")
+
+            if any_accessible:
+                return True, "Outlook accessible — " + " | ".join(parts)
+            else:
+                return False, (
+                    "Folders found but messages are not accessible via JXA. "
+                    "This is a known limitation of New Outlook for Mac. "
+                    "Fix: open Outlook → View → Switch to Legacy Outlook. "
+                    "Details: " + " | ".join(parts)
+                )
 
         except subprocess.TimeoutExpired:
             return False, "Timed out — make sure Outlook is open"
         except Exception as e:
             return False, str(e)
+
+    def raw_diagnostic(self) -> dict:
+        """Return the full diagnostic dict for the /api/debug-outlook endpoint."""
+        try:
+            return _run_jxa(_SCRIPT_TEST, timeout=25)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def get_all_messages(self, limit: int = _FETCH_LIMIT) -> list:
         script = (_SCRIPT_GET_HEADERS

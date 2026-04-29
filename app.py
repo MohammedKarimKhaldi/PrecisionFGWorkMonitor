@@ -56,6 +56,12 @@ def debug_outlook():
     return jsonify(_outlook.raw_diagnostic())
 
 
+@app.route("/api/debug-emails")
+def debug_emails():
+    """First 5 inbox messages with all sender-access paths — confirms which path returns email addresses."""
+    return jsonify(_outlook.debug_messages())
+
+
 @app.route("/api/test-ollama")
 def test_ollama():
     from ai_classifier import test_ollama as _test

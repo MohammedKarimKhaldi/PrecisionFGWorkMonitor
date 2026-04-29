@@ -124,9 +124,25 @@ FOLDER_HELPERS
             if (!d) { try { d = m.timeSent(); } catch(e) {} }
             if (!d) return;
             if (d.getTime() < cutoffMs) return;
+
+            // In Outlook Mac, sender.emailAddress is a record {address, name},
+            // not a plain string — must access the .address sub-field.
             var fromAddr = '', fromName = '';
-            try { fromAddr = m.sender.emailAddress() || ''; } catch(e) {}
-            try { fromName = m.sender.name()         || ''; } catch(e) {}
+            try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
+            if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
+            if (!fromAddr) {
+                // Fallback: emailAddress() might return string on some builds
+                try {
+                    var ea = m.sender.emailAddress();
+                    fromAddr = (typeof ea === 'string') ? ea : '';
+                } catch(e) {}
+            }
+
+            try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
+            if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
+            if (!fromName) { try { fromName = m.sender.name()        || ''; } catch(e) {} }
+            if (!fromName) { try { fromName = m.sender.displayName() || ''; } catch(e) {} }
+
             seen[id] = true;
             result.push({
                 id:       id,
@@ -211,8 +227,12 @@ FOLDER_HELPERS
             var id = String(m.id());
             if (seen[id]) return;
             var fromAddr = '', fromName = '';
-            try { fromAddr = m.sender.emailAddress() || ''; } catch(e) {}
-            try { fromName = m.sender.name()         || ''; } catch(e) {}
+            try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
+            if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
+            if (!fromAddr) { try { var ea = m.sender.emailAddress(); fromAddr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
+            try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
+            if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
+            if (!fromName) { try { fromName = m.sender.name() || ''; } catch(e) {} }
             var subj = (m.subject() || '').toLowerCase();
             var q    = query.toLowerCase();
             if (subj.indexOf(q) < 0 && fromAddr.toLowerCase().indexOf(q) < 0
@@ -271,6 +291,44 @@ FOLDER_HELPERS
     return JSON.stringify(result);
 })()
 """.replace("FOLDER_HELPERS", _FOLDER_HELPERS)
+
+# ── Sender probe (debug) ─────────────────────────────────────────────────
+# Returns the first 5 inbox messages with every sender-access method tried,
+# so we can see which path actually returns the email address.
+
+_SCRIPT_DEBUG_MESSAGES = """\
+(function() {
+    var app = Application('Microsoft Outlook');
+    var result = [];
+    var msgs = app.inbox.messages();
+    var n = Math.min(5, msgs.length);
+    for (var i = msgs.length - 1; i >= Math.max(0, msgs.length - n); i--) {
+        var m = msgs[i];
+        var row = { subject: '' };
+        try { row.subject = m.subject() || ''; } catch(e) {}
+
+        // Path A: sender.emailAddress.address (record sub-field)
+        try { row.pathA_addr = m.sender.emailAddress.address() || ''; } catch(e) { row.pathA_err = e.message; }
+        try { row.pathA_name = m.sender.emailAddress.name() || ''; } catch(e) {}
+
+        // Path B: sender.emailAddress() directly (might be string or object)
+        try {
+            var ea = m.sender.emailAddress();
+            row.pathB_type = typeof ea;
+            row.pathB_val  = String(ea);
+        } catch(e) { row.pathB_err = e.message; }
+
+        // Path C: sender.name()
+        try { row.pathC_name = m.sender.name() || ''; } catch(e) { row.pathC_err = e.message; }
+
+        // Path D: sender.displayName()
+        try { row.pathD_name = m.sender.displayName() || ''; } catch(e) { row.pathD_err = e.message; }
+
+        result.push(row);
+    }
+    return JSON.stringify(result);
+})()
+"""
 
 # ── Folder list ───────────────────────────────────────────────────────────
 
@@ -393,6 +451,13 @@ class OutlookMacClient:
             return _run_jxa(_SCRIPT_TEST, timeout=25)
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def debug_messages(self) -> list:
+        """Return first 5 inbox messages with all sender-access paths probed."""
+        try:
+            return _run_jxa(_SCRIPT_DEBUG_MESSAGES, timeout=30)
+        except Exception as e:
+            return [{"error": str(e)}]
 
     def get_all_messages(self, limit: int = _FETCH_LIMIT) -> list:
         script = (_SCRIPT_GET_HEADERS

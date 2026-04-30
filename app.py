@@ -14,12 +14,12 @@ CORS(app)
 
 _outlook = OutlookMacClient()
 
-# Simple in-memory email cache (5-minute TTL) to avoid re-running JXA on auto-classify
+# In-memory email cache — 30-min TTL since fetching all emails takes time
 _email_cache: dict = {"messages": [], "grouped": [], "ts": 0}
-_CACHE_TTL = 300  # seconds
+_CACHE_TTL = 1800  # seconds
 
 
-def _get_emails_cached(limit: int = 200) -> tuple[list, list]:
+def _get_emails_cached(limit: int = 10000) -> tuple[list, list]:
     if time.time() - _email_cache["ts"] < _CACHE_TTL and _email_cache["messages"]:
         return _email_cache["messages"], _email_cache["grouped"]
     messages = _outlook.get_all_messages(limit)
@@ -72,7 +72,7 @@ def debug_sent():
 def debug_groups():
     """Show from-address parsing for all messages — bypasses cache for fresh diagnostics."""
     _email_cache["ts"] = 0   # force fresh fetch
-    messages, grouped = _get_emails_cached(200)
+    messages, grouped = _get_emails_cached()
     own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
     breakdown = {"empty_from": 0, "own_domain": 0, "external": 0, "domains": {}}
     for msg in messages:
@@ -109,8 +109,7 @@ def test_ollama():
 @app.route("/api/emails")
 def get_emails():
     try:
-        limit    = int(request.args.get("top", 150))
-        messages, grouped = _get_emails_cached(limit)
+        messages, grouped = _get_emails_cached()
         return jsonify({"messages": messages[:60], "grouped": grouped})
     except Exception as e:
         return jsonify({"error": str(e), "messages": [], "grouped": []}), 500
@@ -199,7 +198,7 @@ def auto_classify():
 
             # Force a fresh fetch so we always use current email data
             _email_cache["ts"] = 0
-            messages, grouped = _get_emails_cached(200)
+            messages, grouped = _get_emails_cached()
 
             print(f"[auto-classify] fetched {len(messages)} messages, {len(grouped)} groups")
             print(f"[auto-classify] own_domain filter: '{OUTLOOK_EMAIL.split('@')[-1].lower() if '@' in OUTLOOK_EMAIL else '<empty>'}'")

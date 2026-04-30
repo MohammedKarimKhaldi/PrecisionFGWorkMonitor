@@ -6,8 +6,8 @@ import json
 
 from config.settings import OUTLOOK_EMAIL
 
-_FETCH_LIMIT = 300
-_MONTHS_BACK = 12
+_FETCH_LIMIT = 10000   # effectively "all" — cap is the folder size itself
+_MONTHS_BACK = 60      # 5 years of history
 
 
 def _run_jxa(script: str, timeout: int = 90) -> any:
@@ -609,7 +609,7 @@ class OutlookMacClient:
         script = (_SCRIPT_GET_HEADERS
                   .replace("LIMIT", str(limit))
                   .replace("MONTHS", str(_MONTHS_BACK)))
-        raw = _run_jxa(script, timeout=180)
+        raw = _run_jxa(script, timeout=600)  # up to 10 min for large mailboxes
         seen, result = set(), []
         for r in raw:
             key = r.get("id") or r.get("subject", "")

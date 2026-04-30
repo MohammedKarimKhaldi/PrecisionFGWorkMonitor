@@ -149,13 +149,23 @@ def log_company_emails(company_name):
 
 @app.route("/api/auto-classify", methods=["POST"])
 def auto_classify():
-    from ai_classifier import classify_domain_emails
+    from ai_classifier import classify_domain_emails, test_ollama
 
     def generate():
         try:
+            # Pre-check: fail fast if Ollama is not reachable
+            ok, ollama_msg = test_ollama()
+            if not ok:
+                yield _sse({"type": "fatal", "error": f"Ollama not ready — {ollama_msg}"})
+                return
+
             yield _sse({"type": "status", "message": "Fetching emails from Outlook…"})
 
+            # Force a fresh fetch so we always use current email data
+            _email_cache["ts"] = 0
             messages, grouped = _get_emails_cached(200)
+
+            print(f"[auto-classify] fetched {len(messages)} messages, {len(grouped)} groups")
 
             if not grouped:
                 yield _sse({"type": "done", "classified": 0, "errors": 0,
@@ -173,6 +183,7 @@ def auto_classify():
                 domain_msgs.setdefault(d, []).append(msg)
 
             total = len(grouped)
+            print(f"[auto-classify] classifying {total} domains with {OLLAMA_MODEL}")
             yield _sse({"type": "start", "total": total})
 
             classified = 0
@@ -183,6 +194,7 @@ def auto_classify():
                 contacts = group.get("contacts", [])
                 msgs     = domain_msgs.get(domain, [])
 
+                print(f"[auto-classify] {i+1}/{total} {domain} ({len(msgs)} msgs)")
                 yield _sse({
                     "type":   "progress",
                     "domain": domain,
@@ -198,6 +210,7 @@ def auto_classify():
                         result["Last Email Date"] = group["last_email_date"][:10]
 
                     xl.upsert_company(result)
+                    print(f"[auto-classify]   → {result.get('Company', domain)} | {result.get('Status', '?')}")
 
                     yield _sse({
                         "type":    "result",
@@ -210,9 +223,11 @@ def auto_classify():
                     classified += 1
 
                 except Exception as e:
+                    print(f"[auto-classify]   ✗ {domain}: {e}")
                     yield _sse({"type": "error", "domain": domain, "error": str(e)})
                     errors += 1
 
+            print(f"[auto-classify] done — {classified} classified, {errors} errors")
             yield _sse({"type": "done", "classified": classified, "errors": errors})
 
         except Exception as e:

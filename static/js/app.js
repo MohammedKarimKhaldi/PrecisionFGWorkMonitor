@@ -508,7 +508,7 @@ async function autoClassify() {
           total = evt.total;
           barWrap.style.display = 'block';
           heading.textContent   = `✦ AI Classification — processing ${total} domain(s)`;
-          addLine(`<span style="color:#5c35c8;font-weight:600">Found ${total} email group(s). Classifying with Claude…</span>`);
+          addLine(`<span style="color:#5c35c8;font-weight:600">Found ${total} email group(s). Classifying with Ollama…</span>`);
 
         } else if (evt.type === 'progress') {
           done = evt.index;
@@ -543,11 +543,14 @@ async function autoClassify() {
           summary.innerHTML =
             `<strong style="color:#2e7d32">✓ ${evt.classified} deal(s) saved to Excel</strong>` +
             (evt.errors ? `<span style="color:#c62828">${evt.errors} error(s)</span>` : '') +
-            `<button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="reloadAfterClassify()">Reload Pipeline</button>`;
+            (evt.message ? `<span style="color:#888;font-size:12px">${esc(evt.message)}</span>` : '');
+          // Auto-reload the pipeline table so results appear immediately
+          reloadAfterClassify();
 
         } else if (evt.type === 'fatal') {
           heading.textContent = '✦ AI Classification — failed';
-          addLine(`<span class="cl-err">Fatal error: ${esc(evt.error)}</span>`);
+          addLine(`<span class="cl-err" style="white-space:pre-wrap">✗ ${esc(evt.error)}</span>`);
+          addLine(`<span style="color:#888;font-size:11px">To fix: install Ollama from https://ollama.ai, then run:<br><code>ollama serve</code> and <code>ollama pull llama3.2</code></span>`);
           toast('Auto-classify failed: ' + evt.error, 'error');
         }
       }

@@ -115,15 +115,20 @@ _SCRIPT_GET_HEADERS = """\
 
 FOLDER_HELPERS
 
+    // For recipient objects, emailAddress() materialises to a plain JS object
+    // {address: "...", name: "..."} — accessing .address() as a method call fails
+    // with "Il est impossible de convertir les types."
     function getAddrFromRecord(rec) {
         var addr = '';
-        try { addr = rec.emailAddress.address() || ''; } catch(e) {}
+        try { var ea = rec.emailAddress(); if (ea && ea.address) { addr = String(ea.address); } } catch(e) {}
+        if (!addr) { try { addr = rec.emailAddress.address() || ''; } catch(e) {} }
         if (!addr) { try { addr = rec.emailAddress.address || ''; } catch(e) {} }
         return addr;
     }
     function getNameFromRecord(rec) {
         var name = '';
-        try { name = rec.emailAddress.name() || ''; } catch(e) {}
+        try { var ea = rec.emailAddress(); if (ea && ea.name) { name = String(ea.name); } } catch(e) {}
+        if (!name) { try { name = rec.emailAddress.name() || ''; } catch(e) {} }
         if (!name) { try { name = rec.emailAddress.name || ''; } catch(e) {} }
         return name;
     }
@@ -247,12 +252,16 @@ _SCRIPT_SEARCH = """\
 FOLDER_HELPERS
 
     function getAddrM(rec) {
-        var a = ''; try { a = rec.emailAddress.address() || ''; } catch(e) {}
+        var a = '';
+        try { var ea = rec.emailAddress(); if (ea && ea.address) { a = String(ea.address); } } catch(e) {}
+        if (!a) { try { a = rec.emailAddress.address() || ''; } catch(e) {} }
         if (!a) { try { a = rec.emailAddress.address || ''; } catch(e) {} }
         return a;
     }
     function getNameM(rec) {
-        var n = ''; try { n = rec.emailAddress.name() || ''; } catch(e) {}
+        var n = '';
+        try { var ea = rec.emailAddress(); if (ea && ea.name) { n = String(ea.name); } } catch(e) {}
+        if (!n) { try { n = rec.emailAddress.name() || ''; } catch(e) {} }
         if (!n) { try { n = rec.emailAddress.name || ''; } catch(e) {} }
         return n;
     }

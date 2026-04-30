@@ -379,54 +379,80 @@ _SCRIPT_DEBUG_SENT = """\
 
 FOLDER_HELPERS
 
-    // Find the sent folder (top-level or nested)
+    // Recursively find the first sent folder that actually has messages
+    function findRealSent(folder, depth) {
+        if (depth > 5) return null;
+        var count = 0;
+        try { count = folder.messages().length; } catch(e) {}
+        if (count > 0) return folder;
+        try {
+            var sub = folder.mailFolders();
+            for (var i = 0; i < sub.length; i++) {
+                try {
+                    if (isSent(sub[i].name())) {
+                        var found = findRealSent(sub[i], depth + 1);
+                        if (found) return found;
+                    }
+                } catch(e) {}
+            }
+        } catch(e) {}
+        return null;
+    }
+
     var sentFolderObj = null;
     try {
         var top = app.mailFolders();
         for (var k = 0; k < top.length && !sentFolderObj; k++) {
             try {
-                if (isSent(top[k].name())) { sentFolderObj = top[k]; break; }
-                var sub = top[k].mailFolders();
-                for (var j = 0; j < sub.length; j++) {
-                    try { if (isSent(sub[j].name())) { sentFolderObj = sub[j]; break; } } catch(e) {}
+                var n = top[k].name();
+                if (isSent(n)) {
+                    sentFolderObj = findRealSent(top[k], 0);
                 }
             } catch(e) {}
         }
     } catch(e) { result.err = e.message; }
 
     if (!sentFolderObj) {
-        result.sentFolder = 'NOT FOUND';
+        result.sentFolder = 'NOT FOUND (with messages)';
         return JSON.stringify(result);
     }
 
-    var sentName = '';
-    try { sentName = sentFolderObj.name(); } catch(e) {}
     var sentCount = -1;
     try { sentCount = sentFolderObj.messages().length; } catch(e) {}
+    var sentName = '';
+    try { sentName = sentFolderObj.name(); } catch(e) {}
     result.sentFolder = sentName + ' (' + sentCount + ' msgs)';
 
     var msgs;
     try { msgs = sentFolderObj.messages(); } catch(e) { result.msgsErr = e.message; return JSON.stringify(result); }
 
+    // Probe the last 3 messages (most recent)
     var n = Math.min(3, msgs.length);
     for (var i = msgs.length - 1; i >= Math.max(0, msgs.length - n); i--) {
         var m = msgs[i];
         var row = {};
-        try { row.subject = m.subject() || ''; } catch(e) { row.subject = '(err: ' + e.message + ')'; }
+        try { row.subject = m.subject() || ''; } catch(e) { row.subject = '(err)'; }
 
-        // Recipient paths
-        try { var r = m.toRecipients(); row.toRecip_count = r.length;
-              if (r.length > 0) { row.toRecip0_addr = r[0].emailAddress.address(); row.toRecip0_name = r[0].emailAddress.name(); }
-        } catch(e) { row.toRecip_err = e.message; }
+        // Sender (should be the user)
+        try { row.sender_addr = m.sender.emailAddress.address() || '(empty)'; } catch(e) { row.sender_err = e.message; }
 
-        try { var r2 = m.ccRecipients(); row.ccRecip_count = r2.length; } catch(e) { row.ccRecip_err = e.message; }
+        // TO recipients - method 1: toRecipients()
+        try {
+            var r1 = m.toRecipients();
+            row.toRecipients_count = r1.length;
+            if (r1.length > 0) {
+                try { row.toR0_addr_call = r1[0].emailAddress.address() || '(empty)'; } catch(e) { row.toR0_addr_call_err = e.message; }
+                try { row.toR0_addr_prop = r1[0].emailAddress.address || '(empty)'; } catch(e) {}
+                try { row.toR0_name_call = r1[0].emailAddress.name() || '(empty)'; } catch(e) {}
+                try { row.toR0_raw = String(r1[0].emailAddress()); } catch(e) { row.toR0_raw_err = e.message; }
+            }
+        } catch(e) { row.toRecipients_err = e.message; }
 
-        try { var r3 = m.recipients(); row.recip_count = r3.length;
-              if (r3.length > 0) { row.recip0_addr = r3[0].emailAddress.address(); }
-        } catch(e) { row.recip_err = e.message; }
+        // recipients() - alternative name
+        try { var r2 = m.recipients(); row.recipients_count = r2.length; } catch(e) { row.recipients_err = e.message; }
 
-        // Sender paths (to confirm sender = user)
-        try { row.sender_addr = m.sender.emailAddress.address() || ''; } catch(e) { row.sender_err = e.message; }
+        // ccRecipients()
+        try { var r3 = m.ccRecipients(); row.ccRecipients_count = r3.length; } catch(e) { row.ccRecipients_err = e.message; }
 
         result.msgs.push(row);
     }

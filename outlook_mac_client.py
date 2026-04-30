@@ -369,6 +369,71 @@ _SCRIPT_DEBUG_MESSAGES = """\
 })()
 """
 
+# ── Sent-item recipient probe (debug) ────────────────────────────────────
+# Tries every known JXA path to get recipient addresses from sent messages.
+
+_SCRIPT_DEBUG_SENT = """\
+(function() {
+    var app = Application('Microsoft Outlook');
+    var result = { sentFolder: null, msgs: [] };
+
+FOLDER_HELPERS
+
+    // Find the sent folder (top-level or nested)
+    var sentFolderObj = null;
+    try {
+        var top = app.mailFolders();
+        for (var k = 0; k < top.length && !sentFolderObj; k++) {
+            try {
+                if (isSent(top[k].name())) { sentFolderObj = top[k]; break; }
+                var sub = top[k].mailFolders();
+                for (var j = 0; j < sub.length; j++) {
+                    try { if (isSent(sub[j].name())) { sentFolderObj = sub[j]; break; } } catch(e) {}
+                }
+            } catch(e) {}
+        }
+    } catch(e) { result.err = e.message; }
+
+    if (!sentFolderObj) {
+        result.sentFolder = 'NOT FOUND';
+        return JSON.stringify(result);
+    }
+
+    var sentName = '';
+    try { sentName = sentFolderObj.name(); } catch(e) {}
+    var sentCount = -1;
+    try { sentCount = sentFolderObj.messages().length; } catch(e) {}
+    result.sentFolder = sentName + ' (' + sentCount + ' msgs)';
+
+    var msgs;
+    try { msgs = sentFolderObj.messages(); } catch(e) { result.msgsErr = e.message; return JSON.stringify(result); }
+
+    var n = Math.min(3, msgs.length);
+    for (var i = msgs.length - 1; i >= Math.max(0, msgs.length - n); i--) {
+        var m = msgs[i];
+        var row = {};
+        try { row.subject = m.subject() || ''; } catch(e) { row.subject = '(err: ' + e.message + ')'; }
+
+        // Recipient paths
+        try { var r = m.toRecipients(); row.toRecip_count = r.length;
+              if (r.length > 0) { row.toRecip0_addr = r[0].emailAddress.address(); row.toRecip0_name = r[0].emailAddress.name(); }
+        } catch(e) { row.toRecip_err = e.message; }
+
+        try { var r2 = m.ccRecipients(); row.ccRecip_count = r2.length; } catch(e) { row.ccRecip_err = e.message; }
+
+        try { var r3 = m.recipients(); row.recip_count = r3.length;
+              if (r3.length > 0) { row.recip0_addr = r3[0].emailAddress.address(); }
+        } catch(e) { row.recip_err = e.message; }
+
+        // Sender paths (to confirm sender = user)
+        try { row.sender_addr = m.sender.emailAddress.address() || ''; } catch(e) { row.sender_err = e.message; }
+
+        result.msgs.push(row);
+    }
+    return JSON.stringify(result);
+})()
+""".replace("FOLDER_HELPERS", _FOLDER_HELPERS)
+
 # ── Folder list ───────────────────────────────────────────────────────────
 
 _SCRIPT_LIST_FOLDERS = """\
@@ -497,6 +562,13 @@ class OutlookMacClient:
             return _run_jxa(_SCRIPT_DEBUG_MESSAGES, timeout=30)
         except Exception as e:
             return [{"error": str(e)}]
+
+    def debug_sent(self) -> dict:
+        """Probe all recipient-access paths on the first 3 sent messages."""
+        try:
+            return _run_jxa(_SCRIPT_DEBUG_SENT, timeout=30)
+        except Exception as e:
+            return {"error": str(e)}
 
     def get_all_messages(self, limit: int = _FETCH_LIMIT) -> list:
         script = (_SCRIPT_GET_HEADERS

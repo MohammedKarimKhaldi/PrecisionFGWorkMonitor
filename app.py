@@ -62,9 +62,16 @@ def debug_emails():
     return jsonify(_outlook.debug_messages())
 
 
+@app.route("/api/debug-sent")
+def debug_sent():
+    """Probe all recipient-access paths on sent items — tells us which JXA path works."""
+    return jsonify(_outlook.debug_sent())
+
+
 @app.route("/api/debug-groups")
 def debug_groups():
-    """Show from-address parsing for all cached messages — diagnoses why grouping returns 0."""
+    """Show from-address parsing for all messages — bypasses cache for fresh diagnostics."""
+    _email_cache["ts"] = 0   # force fresh fetch
     messages, grouped = _get_emails_cached(200)
     own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
     breakdown = {"empty_from": 0, "own_domain": 0, "external": 0, "domains": {}}

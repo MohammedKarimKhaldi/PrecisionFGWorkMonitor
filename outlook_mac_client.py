@@ -115,6 +115,19 @@ _SCRIPT_GET_HEADERS = """\
 
 FOLDER_HELPERS
 
+    function getAddrFromRecord(rec) {
+        var addr = '';
+        try { addr = rec.emailAddress.address() || ''; } catch(e) {}
+        if (!addr) { try { addr = rec.emailAddress.address || ''; } catch(e) {} }
+        return addr;
+    }
+    function getNameFromRecord(rec) {
+        var name = '';
+        try { name = rec.emailAddress.name() || ''; } catch(e) {}
+        if (!name) { try { name = rec.emailAddress.name || ''; } catch(e) {} }
+        return name;
+    }
+
     function addMsg(m, folderName) {
         try {
             var id = String(m.id());
@@ -125,23 +138,34 @@ FOLDER_HELPERS
             if (!d) return;
             if (d.getTime() < cutoffMs) return;
 
-            // In Outlook Mac, sender.emailAddress is a record {address, name},
-            // not a plain string — must access the .address sub-field.
             var fromAddr = '', fromName = '';
-            try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
-            if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
-            if (!fromAddr) {
-                // Fallback: emailAddress() might return string on some builds
-                try {
-                    var ea = m.sender.emailAddress();
-                    fromAddr = (typeof ea === 'string') ? ea : '';
-                } catch(e) {}
-            }
 
-            try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
-            if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
-            if (!fromName) { try { fromName = m.sender.name()        || ''; } catch(e) {} }
-            if (!fromName) { try { fromName = m.sender.displayName() || ''; } catch(e) {} }
+            if (folderName === 'Sent') {
+                // For sent items the user is the sender — use the first TO recipient
+                // to identify the company being emailed.
+                try {
+                    var recips = m.toRecipients();
+                    if (recips && recips.length > 0) {
+                        fromAddr = getAddrFromRecord(recips[0]);
+                        fromName = getNameFromRecord(recips[0]);
+                    }
+                } catch(e) {}
+            } else {
+                // For inbox, use the actual sender.
+                // sender.emailAddress is a record {address, name} in Outlook Mac.
+                try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
+                if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
+                if (!fromAddr) {
+                    try {
+                        var ea = m.sender.emailAddress();
+                        fromAddr = (typeof ea === 'string') ? ea : '';
+                    } catch(e) {}
+                }
+                try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
+                if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
+                if (!fromName) { try { fromName = m.sender.name()        || ''; } catch(e) {} }
+                if (!fromName) { try { fromName = m.sender.displayName() || ''; } catch(e) {} }
+            }
 
             seen[id] = true;
             result.push({
@@ -222,17 +246,32 @@ _SCRIPT_SEARCH = """\
 
 FOLDER_HELPERS
 
+    function getAddrM(rec) {
+        var a = ''; try { a = rec.emailAddress.address() || ''; } catch(e) {}
+        if (!a) { try { a = rec.emailAddress.address || ''; } catch(e) {} }
+        return a;
+    }
+    function getNameM(rec) {
+        var n = ''; try { n = rec.emailAddress.name() || ''; } catch(e) {}
+        if (!n) { try { n = rec.emailAddress.name || ''; } catch(e) {} }
+        return n;
+    }
+
     function matchMsg(m, folderName) {
         try {
             var id = String(m.id());
             if (seen[id]) return;
             var fromAddr = '', fromName = '';
-            try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
-            if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
-            if (!fromAddr) { try { var ea = m.sender.emailAddress(); fromAddr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
-            try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
-            if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
-            if (!fromName) { try { fromName = m.sender.name() || ''; } catch(e) {} }
+            if (folderName === 'Sent') {
+                try { var r = m.toRecipients(); if (r && r.length > 0) { fromAddr = getAddrM(r[0]); fromName = getNameM(r[0]); } } catch(e) {}
+            } else {
+                try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
+                if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
+                if (!fromAddr) { try { var ea = m.sender.emailAddress(); fromAddr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
+                try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
+                if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
+                if (!fromName) { try { fromName = m.sender.name() || ''; } catch(e) {} }
+            }
             var subj = (m.subject() || '').toLowerCase();
             var q    = query.toLowerCase();
             if (subj.indexOf(q) < 0 && fromAddr.toLowerCase().indexOf(q) < 0

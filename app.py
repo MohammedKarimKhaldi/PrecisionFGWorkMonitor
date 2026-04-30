@@ -62,6 +62,35 @@ def debug_emails():
     return jsonify(_outlook.debug_messages())
 
 
+@app.route("/api/debug-groups")
+def debug_groups():
+    """Show from-address parsing for all cached messages — diagnoses why grouping returns 0."""
+    messages, grouped = _get_emails_cached(200)
+    own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
+    breakdown = {"empty_from": 0, "own_domain": 0, "external": 0, "domains": {}}
+    for msg in messages:
+        _, fa = parse_email_address(msg.get("from"))
+        domain = fa.split("@")[-1].lower() if "@" in fa else ""
+        if not domain:
+            breakdown["empty_from"] += 1
+        elif domain == own_domain:
+            breakdown["own_domain"] += 1
+        else:
+            breakdown["external"] += 1
+            breakdown["domains"][domain] = breakdown["domains"].get(domain, 0) + 1
+    breakdown["domains"] = dict(sorted(breakdown["domains"].items(), key=lambda x: -x[1])[:20])
+    return jsonify({
+        "total_messages": len(messages),
+        "grouped_count": len(grouped),
+        "own_domain": own_domain,
+        "breakdown": breakdown,
+        "sample_from": [
+            {"folder": m.get("folder"), "from": (m.get("from") or {}).get("emailAddress", {})}
+            for m in messages[:5]
+        ],
+    })
+
+
 @app.route("/api/test-ollama")
 def test_ollama():
     from ai_classifier import test_ollama as _test
@@ -166,6 +195,11 @@ def auto_classify():
             messages, grouped = _get_emails_cached(200)
 
             print(f"[auto-classify] fetched {len(messages)} messages, {len(grouped)} groups")
+            print(f"[auto-classify] own_domain filter: '{OUTLOOK_EMAIL.split('@')[-1].lower() if '@' in OUTLOOK_EMAIL else '<empty>'}'")
+            # Sample first 10 from-addresses to diagnose grouping
+            for m in messages[:10]:
+                _, fa = parse_email_address(m.get("from"))
+                print(f"[auto-classify]   sample from: '{fa}' folder={m.get('folder','')} subj={m.get('subject','')[:40]}")
 
             if not grouped:
                 yield _sse({"type": "done", "classified": 0, "errors": 0,

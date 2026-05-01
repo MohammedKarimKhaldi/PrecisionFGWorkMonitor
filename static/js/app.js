@@ -25,6 +25,7 @@ const state = {
   emails:        [],
   emailsGrouped: [],
   emailsTotal:   0,
+  cachedAt:      0,
   statuses:      [],
   selectedCompany: null,
   currentEmails: [],
@@ -66,18 +67,30 @@ async function loadCompanies() {
   }
 }
 
-async function loadEmails() {
-  setConnBadge('unknown', '● fetching emails…');
+async function loadEmails(forceRefresh = false) {
+  setConnBadge('unknown', forceRefresh ? '● fetching from Outlook…' : '● loading cache…');
   try {
-    const data = await API.get('/api/emails');
+    const url  = forceRefresh ? '/api/emails?refresh=true' : '/api/emails';
+    const data = await API.get(url);
     state.emails        = data.messages  || [];
     state.emailsGrouped = data.grouped   || [];
     state.emailsTotal   = data.total     || state.emails.length;
-    setConnBadge('ok', '● connected');
+    state.cachedAt      = data.cached_at || 0;
+    const badge = _cacheAgeBadge(state.cachedAt);
+    setConnBadge('ok', badge);
   } catch (e) {
-    setConnBadge('error', '● IMAP error');
+    setConnBadge('error', '● error');
     toast('Email load failed: ' + e.message, 'error');
   }
+}
+
+function _cacheAgeBadge(ts) {
+  if (!ts) return '● connected';
+  const mins = Math.round((Date.now() / 1000 - ts) / 60);
+  if (mins < 2)  return '● emails: just refreshed';
+  if (mins < 60) return `● emails: ${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  return `● emails: ${hrs}h ago`;
 }
 
 function setConnBadge(type, text) {
@@ -588,11 +601,11 @@ function populateFilterDropdown() {
 async function refreshAll() {
   const btn = document.getElementById('refresh-btn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Loading…';
+  btn.innerHTML = '<span class="spinner"></span> Fetching from Outlook…';
   try {
-    await Promise.all([loadCompanies(), loadEmails()]);
+    await Promise.all([loadCompanies(), loadEmails(true)]);
     renderAll();
-    toast('Refreshed', 'success');
+    toast('Emails refreshed from Outlook and saved', 'success');
   } catch (e) {
     toast('Refresh failed: ' + e.message, 'error');
   } finally {

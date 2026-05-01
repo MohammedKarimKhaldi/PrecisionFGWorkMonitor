@@ -1,12 +1,14 @@
 """Flask backend — reads Outlook via macOS JXA, stores pipeline in local Excel."""
 import json
+import os
 import time
 from flask import Flask, jsonify, request, send_file, render_template, Response, stream_with_context
 from flask_cors import CORS
 
 import excel_manager as xl
 from outlook_mac_client import OutlookMacClient, group_messages_by_domain, parse_email_address
-from config.settings import FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL, EXCEL_FILE_PATH, OLLAMA_HOST, OLLAMA_MODEL
+from config.settings import (FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL,
+                              EXCEL_FILE_PATH, OLLAMA_HOST, OLLAMA_MODEL, EMAIL_CACHE_PATH)
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -14,18 +16,56 @@ CORS(app)
 
 _outlook = OutlookMacClient()
 
-# In-memory email cache — 30-min TTL since fetching all emails takes time
+# ── Email cache (memory + disk) ────────────────────────────────────────────
+# On startup: load from disk so Outlook doesn't need to be re-queried.
+# On refresh: fetch fresh from Outlook and overwrite the disk file.
 _email_cache: dict = {"messages": [], "grouped": [], "ts": 0}
-_CACHE_TTL = 1800  # seconds
 
 
-def _get_emails_cached(limit: int = 10000) -> tuple[list, list]:
-    if time.time() - _email_cache["ts"] < _CACHE_TTL and _email_cache["messages"]:
+def _save_disk_cache() -> None:
+    try:
+        with open(EMAIL_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "messages": _email_cache["messages"],
+                "grouped":  _email_cache["grouped"],
+                "ts":       _email_cache["ts"],
+            }, f)
+        print(f"[cache] saved {len(_email_cache['messages'])} messages → {EMAIL_CACHE_PATH}")
+    except Exception as e:
+        print(f"[cache] save failed: {e}")
+
+
+def _load_disk_cache() -> bool:
+    try:
+        if not os.path.exists(EMAIL_CACHE_PATH):
+            return False
+        with open(EMAIL_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _email_cache.update({
+            "messages": data["messages"],
+            "grouped":  data["grouped"],
+            "ts":       data["ts"],
+        })
+        age_h = (time.time() - data["ts"]) / 3600
+        print(f"[cache] loaded {len(data['messages'])} messages from disk (age: {age_h:.1f}h)")
+        return True
+    except Exception as e:
+        print(f"[cache] load failed: {e}")
+        return False
+
+
+def _get_emails_cached(force: bool = False) -> tuple[list, list]:
+    if not force and _email_cache["messages"]:
         return _email_cache["messages"], _email_cache["grouped"]
-    messages = _outlook.get_all_messages(limit)
+    messages = _outlook.get_all_messages()
     grouped  = group_messages_by_domain(messages)
     _email_cache.update({"messages": messages, "grouped": grouped, "ts": time.time()})
+    _save_disk_cache()
     return messages, grouped
+
+
+# Load disk cache immediately — no Outlook query needed on startup
+_load_disk_cache()
 
 
 def _sse(payload: dict) -> str:
@@ -109,14 +149,28 @@ def test_ollama():
 @app.route("/api/emails")
 def get_emails():
     try:
-        messages, grouped = _get_emails_cached()
+        force = request.args.get("refresh") == "true"
+        messages, grouped = _get_emails_cached(force=force)
         return jsonify({
-            "messages": messages[:60],   # display only
-            "grouped":  grouped,
-            "total":    len(messages),   # real count for the stat bar
+            "messages":  messages[:60],
+            "grouped":   grouped,
+            "total":     len(messages),
+            "cached_at": _email_cache["ts"],
         })
     except Exception as e:
         return jsonify({"error": str(e), "messages": [], "grouped": [], "total": 0}), 500
+
+
+@app.route("/api/cache-info")
+def cache_info():
+    ts = _email_cache["ts"]
+    return jsonify({
+        "cached_at":   ts,
+        "age_seconds": int(time.time() - ts) if ts else None,
+        "total":       len(_email_cache["messages"]),
+        "groups":      len(_email_cache["grouped"]),
+        "disk_exists": os.path.exists(EMAIL_CACHE_PATH),
+    })
 
 
 @app.route("/api/emails/search")
@@ -198,10 +252,8 @@ def auto_classify():
                 yield _sse({"type": "fatal", "error": f"Ollama not ready — {ollama_msg}"})
                 return
 
-            yield _sse({"type": "status", "message": "Fetching emails from Outlook…"})
+            yield _sse({"type": "status", "message": "Loading emails from cache…"})
 
-            # Force a fresh fetch so we always use current email data
-            _email_cache["ts"] = 0
             messages, grouped = _get_emails_cached()
 
             print(f"[auto-classify] fetched {len(messages)} messages, {len(grouped)} groups")

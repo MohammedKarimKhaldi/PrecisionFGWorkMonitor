@@ -24,9 +24,10 @@ const state = {
   companies:     [],
   emails:        [],
   emailsGrouped: [],
+  emailsTotal:   0,
   statuses:      [],
   selectedCompany: null,
-  currentEmails: [],   // emails for selected company detail
+  currentEmails: [],
 };
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -68,9 +69,10 @@ async function loadCompanies() {
 async function loadEmails() {
   setConnBadge('unknown', '● fetching emails…');
   try {
-    const data = await API.get('/api/emails?top=150');
+    const data = await API.get('/api/emails');
     state.emails        = data.messages  || [];
     state.emailsGrouped = data.grouped   || [];
+    state.emailsTotal   = data.total     || state.emails.length;
     setConnBadge('ok', '● connected');
   } catch (e) {
     setConnBadge('error', '● IMAP error');
@@ -110,7 +112,7 @@ function renderStats() {
       color: '#1B5E20' },
     { label: 'Lost',      val: (counts['Not Interested']||0)+(counts['Closed – Lost']||0),
       color: '#c62828' },
-    { label: 'Emails',    val: state.emails.length,
+    { label: 'Emails',    val: state.emailsTotal,
       color: '#6a1b9a' },
   ];
 

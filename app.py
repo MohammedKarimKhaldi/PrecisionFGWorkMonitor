@@ -110,9 +110,13 @@ def test_ollama():
 def get_emails():
     try:
         messages, grouped = _get_emails_cached()
-        return jsonify({"messages": messages[:60], "grouped": grouped})
+        return jsonify({
+            "messages": messages[:60],   # display only
+            "grouped":  grouped,
+            "total":    len(messages),   # real count for the stat bar
+        })
     except Exception as e:
-        return jsonify({"error": str(e), "messages": [], "grouped": []}), 500
+        return jsonify({"error": str(e), "messages": [], "grouped": [], "total": 0}), 500
 
 
 @app.route("/api/emails/search")

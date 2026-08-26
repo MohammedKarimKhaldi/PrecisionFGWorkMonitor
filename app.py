@@ -6,9 +6,12 @@ from flask import Flask, jsonify, request, send_file, render_template, Response,
 from flask_cors import CORS
 
 import excel_manager as xl
-from outlook_mac_client import OutlookMacClient, group_messages_by_domain, parse_email_address
+from outlook_mac_client import (OutlookMacClient, external_domains_for_message,
+                                external_participants_for_message,
+                                group_messages_by_domain, parse_email_address)
 from config.settings import (FLASK_SECRET_KEY, MANDATE_STATUSES, OUTLOOK_EMAIL,
-                              EXCEL_FILE_PATH, OLLAMA_HOST, OLLAMA_MODEL, EMAIL_CACHE_PATH)
+                              EXCEL_FILE_PATH, OLLAMA_HOST, OLLAMA_MODEL,
+                              EMAIL_CACHE_PATH, FOLLOW_UP_DAYS)
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -19,19 +22,45 @@ _outlook = OutlookMacClient()
 # ── Email cache (memory + disk) ────────────────────────────────────────────
 # On startup: load from disk so Outlook doesn't need to be re-queried.
 # On refresh: fetch fresh from Outlook and overwrite the disk file.
+EMAIL_CACHE_VERSION = 1
 _email_cache: dict = {"messages": [], "grouped": [], "ts": 0}
 
 
+def _cache_meta() -> dict:
+    ts = _email_cache["ts"]
+    return {
+        "cached_at": ts,
+        "age_seconds": int(time.time() - ts) if ts else None,
+        "total": len(_email_cache["messages"]),
+        "groups": len(_email_cache["grouped"]),
+        "cache_path": EMAIL_CACHE_PATH,
+        "disk_exists": os.path.exists(EMAIL_CACHE_PATH),
+        "needs_refresh": not bool(_email_cache["messages"]),
+    }
+
+
 def _save_disk_cache() -> None:
+    tmp_path = f"{EMAIL_CACHE_PATH}.{os.getpid()}.tmp"
     try:
-        with open(EMAIL_CACHE_PATH, "w", encoding="utf-8") as f:
+        cache_dir = os.path.dirname(os.path.abspath(EMAIL_CACHE_PATH))
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump({
-                "messages": _email_cache["messages"],
-                "grouped":  _email_cache["grouped"],
+                "version":  EMAIL_CACHE_VERSION,
                 "ts":       _email_cache["ts"],
+                "messages": _email_cache["messages"],
             }, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, EMAIL_CACHE_PATH)
         print(f"[cache] saved {len(_email_cache['messages'])} messages → {EMAIL_CACHE_PATH}")
     except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         print(f"[cache] save failed: {e}")
 
 
@@ -41,27 +70,108 @@ def _load_disk_cache() -> bool:
             return False
         with open(EMAIL_CACHE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("email cache is not a JSON object")
+        messages = data.get("messages", [])
+        if not isinstance(messages, list):
+            raise ValueError("email cache messages must be a list")
         _email_cache.update({
-            "messages": data["messages"],
-            "grouped":  data["grouped"],
-            "ts":       data["ts"],
+            "messages": messages,
+            "grouped":  group_messages_by_domain(messages),
+            "ts":       data.get("ts", 0),
         })
-        age_h = (time.time() - data["ts"]) / 3600
-        print(f"[cache] loaded {len(data['messages'])} messages from disk (age: {age_h:.1f}h)")
+        age_h = (time.time() - data.get("ts", 0)) / 3600 if data.get("ts") else 0
+        print(f"[cache] loaded {len(messages)} messages from disk (age: {age_h:.1f}h)")
         return True
     except Exception as e:
         print(f"[cache] load failed: {e}")
         return False
 
 
-def _get_emails_cached(force: bool = False) -> tuple[list, list]:
+def _get_emails_cached(force: bool = False, allow_fetch: bool = False) -> tuple[list, list]:
     if not force and _email_cache["messages"]:
+        return _email_cache["messages"], _email_cache["grouped"]
+    if not force and not allow_fetch:
         return _email_cache["messages"], _email_cache["grouped"]
     messages = _outlook.get_all_messages()
     grouped  = group_messages_by_domain(messages)
     _email_cache.update({"messages": messages, "grouped": grouped, "ts": time.time()})
     _save_disk_cache()
     return messages, grouped
+
+
+def _domain_for_message(msg: dict) -> str:
+    domains = external_domains_for_message(msg)
+    if domains:
+        return domains[0]
+    _, addr = parse_email_address(msg.get("from"))
+    return addr.split("@")[-1].lower() if "@" in addr else ""
+
+
+def _cached_messages_for_domain(domain: str, allow_fetch: bool = False) -> tuple[list, dict]:
+    domain = (domain or "").lower().strip()
+    if not domain:
+        return [], {}
+    messages, grouped = _get_emails_cached(allow_fetch=allow_fetch)
+    group = next((g for g in grouped if g.get("domain") == domain), {})
+    return [m for m in messages if domain in external_domains_for_message(m)], group
+
+
+def _normalize_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _company_tokens(value: str) -> list[str]:
+    generic = {
+        "asset", "assets", "management", "capital", "partners", "partner",
+        "group", "holdings", "holding", "limited", "ltd", "llc", "inc", "plc",
+        "fund", "funds", "ventures", "venture", "family", "office",
+        "investment", "investments",
+    }
+    tokens = [
+        token for token in "".join(
+            ch.lower() if ch.isalnum() else " " for ch in str(value or "")
+        ).split()
+        if len(token) > 2 and token not in generic
+    ]
+    expanded = set(tokens)
+    for token in tokens:
+        if token.endswith("ical") and len(token) > 6:
+            expanded.add(token[:-4])
+        if token.endswith("medical") and len(token) > 8:
+            expanded.add(token[:-7] + "med")
+    return list(expanded)
+
+
+def _cached_thread_messages(domain: str = "", email: str = "", company: str = "") -> tuple[list, dict]:
+    domain = (domain or "").lower().strip()
+    email = (email or "").lower().strip()
+    if not domain and "@" in email:
+        domain = email.split("@")[-1]
+
+    if domain:
+        return _cached_messages_for_domain(domain, allow_fetch=False)
+
+    messages, _ = _get_emails_cached(allow_fetch=False)
+    tokens = _company_tokens(company)
+    if not tokens:
+        return [], {}
+
+    matched = []
+    for msg in messages:
+        people = external_participants_for_message(msg)
+        haystack_parts = [_normalize_key(msg.get("subject", ""))]
+        for person in people:
+            name, addr = parse_email_address(person)
+            haystack_parts.extend([
+                _normalize_key(name),
+                _normalize_key(addr),
+                _normalize_key((addr.split("@")[-1] if "@" in addr else "").split(".")[0]),
+            ])
+        haystack = " ".join(haystack_parts)
+        if any(token in haystack for token in tokens):
+            matched.append(msg)
+    return matched, {}
 
 
 # Load disk cache immediately — no Outlook query needed on startup
@@ -81,6 +191,8 @@ def api_status():
         "email":       OUTLOOK_EMAIL,
         "imap_server": _outlook._server,
         "excel_path":  xl.get_excel_path(),
+        "follow_up_days": FOLLOW_UP_DAYS,
+        "email_cache": _cache_meta(),
     })
 
 
@@ -110,21 +222,21 @@ def debug_sent():
 
 @app.route("/api/debug-groups")
 def debug_groups():
-    """Show from-address parsing for all messages — bypasses cache for fresh diagnostics."""
-    _email_cache["ts"] = 0   # force fresh fetch
+    """Show address parsing for cached messages without querying Outlook."""
     messages, grouped = _get_emails_cached()
     own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
     breakdown = {"empty_from": 0, "own_domain": 0, "external": 0, "domains": {}}
     for msg in messages:
-        _, fa = parse_email_address(msg.get("from"))
-        domain = fa.split("@")[-1].lower() if "@" in fa else ""
-        if not domain:
+        domains = external_domains_for_message(msg)
+        if not domains:
             breakdown["empty_from"] += 1
-        elif domain == own_domain:
-            breakdown["own_domain"] += 1
         else:
             breakdown["external"] += 1
-            breakdown["domains"][domain] = breakdown["domains"].get(domain, 0) + 1
+            for domain in domains:
+                if domain == own_domain:
+                    breakdown["own_domain"] += 1
+                    continue
+                breakdown["domains"][domain] = breakdown["domains"].get(domain, 0) + 1
     breakdown["domains"] = dict(sorted(breakdown["domains"].items(), key=lambda x: -x[1])[:20])
     return jsonify({
         "total_messages": len(messages),
@@ -150,12 +262,16 @@ def test_ollama():
 def get_emails():
     try:
         force = request.args.get("refresh") == "true"
-        messages, grouped = _get_emails_cached(force=force)
+        messages, grouped = _get_emails_cached(force=force, allow_fetch=force)
+        meta = _cache_meta()
         return jsonify({
             "messages":  messages[:60],
             "grouped":   grouped,
             "total":     len(messages),
-            "cached_at": _email_cache["ts"],
+            "cached_at": meta["cached_at"],
+            "cache_path": meta["cache_path"],
+            "disk_exists": meta["disk_exists"],
+            "needs_refresh": meta["needs_refresh"],
         })
     except Exception as e:
         return jsonify({"error": str(e), "messages": [], "grouped": [], "total": 0}), 500
@@ -163,14 +279,7 @@ def get_emails():
 
 @app.route("/api/cache-info")
 def cache_info():
-    ts = _email_cache["ts"]
-    return jsonify({
-        "cached_at":   ts,
-        "age_seconds": int(time.time() - ts) if ts else None,
-        "total":       len(_email_cache["messages"]),
-        "groups":      len(_email_cache["grouped"]),
-        "disk_exists": os.path.exists(EMAIL_CACHE_PATH),
-    })
+    return jsonify(_cache_meta())
 
 
 @app.route("/api/emails/search")
@@ -183,6 +292,65 @@ def search_emails():
         return jsonify({"messages": messages})
     except Exception as e:
         return jsonify({"error": str(e), "messages": []}), 500
+
+
+@app.route("/api/emails/thread")
+def get_cached_email_thread():
+    domain = request.args.get("domain", "").strip()
+    email = request.args.get("email", "").strip()
+    company = request.args.get("company", "").strip()
+    try:
+        limit = min(max(int(request.args.get("limit", 120)), 1), 300)
+    except ValueError:
+        limit = 120
+
+    if not domain and not email and not company:
+        return jsonify({"error": "domain, email, or company required", "messages": []}), 400
+
+    try:
+        messages, group = _cached_thread_messages(domain=domain, email=email, company=company)
+        messages = sorted(messages, key=lambda m: m.get("receivedDateTime", ""), reverse=True)
+        return jsonify({
+            "messages":  messages[:limit],
+            "total":     len(messages),
+            "group":     group,
+            "source":    "cache",
+            "cached_at": _email_cache["ts"],
+            "cache_path": EMAIL_CACHE_PATH,
+            "disk_exists": os.path.exists(EMAIL_CACHE_PATH),
+            "needs_refresh": not bool(_email_cache["messages"]),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "messages": [], "total": 0}), 500
+
+
+@app.route("/api/emails/message", methods=["POST"])
+def get_email_message():
+    data = request.get_json() or {}
+    message_id = str(data.get("id") or "").strip()
+    if not message_id:
+        return jsonify({"error": "message id required"}), 400
+
+    cached = next(
+        (m for m in _email_cache.get("messages", []) if str(m.get("id") or "") == message_id),
+        None,
+    )
+    if cached and cached.get("body"):
+        return jsonify({"message": cached, "source": "cache"})
+
+    try:
+        message = _outlook.get_message(message_id)
+        if not message:
+            if cached:
+                return jsonify({"message": cached, "source": "cache"})
+            return jsonify({"error": "message not found"}), 404
+        return jsonify({"message": message, "source": "outlook"})
+    except Exception as e:
+        if cached:
+            cached = dict(cached)
+            cached.setdefault("body", {"contentType": "text", "content": cached.get("bodyPreview", "")})
+            return jsonify({"message": cached, "source": "cache", "warning": str(e)})
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/folders")
@@ -208,6 +376,8 @@ def create_or_update_company():
     data = request.get_json()
     if not data or not data.get("Company"):
         return jsonify({"error": "Company name required"}), 400
+    if data.get("Status") and data.get("Status") not in MANDATE_STATUSES:
+        return jsonify({"error": "Invalid status"}), 400
     try:
         xl.upsert_company(data)
         return jsonify({"success": True})
@@ -215,7 +385,21 @@ def create_or_update_company():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/companies/<company_name>/status", methods=["PUT"])
+@app.route("/api/companies/<path:company_name>/details", methods=["PUT"])
+def update_company(company_name):
+    data = request.get_json()
+    if not data or not data.get("Company"):
+        return jsonify({"error": "Company name required"}), 400
+    if data.get("Status") and data.get("Status") not in MANDATE_STATUSES:
+        return jsonify({"error": "Invalid status"}), 400
+    try:
+        xl.upsert_company(data, match_name=company_name)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/companies/<path:company_name>/status", methods=["PUT"])
 def update_status(company_name):
     data = request.get_json()
     new_status = data.get("status")
@@ -228,13 +412,52 @@ def update_status(company_name):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/companies/<company_name>/log-emails", methods=["POST"])
+@app.route("/api/companies/<path:company_name>/log-emails", methods=["POST"])
 def log_company_emails(company_name):
     data    = request.get_json()
     emails  = data.get("emails", [])
     try:
         added = xl.log_emails(emails, company_name)
         return jsonify({"added": added})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/classify", methods=["POST"])
+def classify_deal():
+    from ai_classifier import classify_domain_emails, test_ollama
+
+    data = request.get_json() or {}
+    domain = (data.get("domain") or "").strip().lower()
+    emails = data.get("emails") if isinstance(data.get("emails"), list) else []
+    contacts = data.get("contacts") if isinstance(data.get("contacts"), list) else []
+
+    if not emails and domain:
+        emails, group = _cached_messages_for_domain(domain, allow_fetch=False)
+        contacts = contacts or group.get("contacts", [])
+
+    if not domain:
+        for msg in emails:
+            domain = _domain_for_message(msg)
+            if domain:
+                break
+
+    if not domain and not data.get("company_name"):
+        return jsonify({"error": "Domain or company name required"}), 400
+    if not emails:
+        return jsonify({"error": "No cached thread emails found. Refresh emails or run Search Outlook first."}), 400
+
+    ok, ollama_msg = test_ollama()
+    if not ok:
+        return jsonify({"error": f"Ollama not ready — {ollama_msg}"}), 503
+
+    try:
+        result = classify_domain_emails(domain or data.get("company_name"), emails, contacts)
+        if domain:
+            result["_Domain"] = domain
+        if data.get("last_email_date") and not result.get("Last Email Date"):
+            result["Last Email Date"] = str(data["last_email_date"])[:10]
+        return jsonify({"result": result, "emails_used": len(emails)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -246,15 +469,25 @@ def auto_classify():
 
     def generate():
         try:
-            # Pre-check: fail fast if Ollama is not reachable
+            yield _sse({"type": "status", "message": "Loading emails from cache…"})
+
+            messages, grouped = _get_emails_cached()
+
+            if not messages:
+                yield _sse({
+                    "type": "done",
+                    "classified": 0,
+                    "errors": 0,
+                    "needs_refresh": True,
+                    "message": "No local email cache found. Click Refresh Emails first, then run auto-classify again.",
+                })
+                return
+
+            # Pre-check: fail fast if Ollama is not reachable after confirming cached emails exist.
             ok, ollama_msg = test_ollama()
             if not ok:
                 yield _sse({"type": "fatal", "error": f"Ollama not ready — {ollama_msg}"})
                 return
-
-            yield _sse({"type": "status", "message": "Loading emails from cache…"})
-
-            messages, grouped = _get_emails_cached()
 
             print(f"[auto-classify] fetched {len(messages)} messages, {len(grouped)} groups")
             print(f"[auto-classify] own_domain filter: '{OUTLOOK_EMAIL.split('@')[-1].lower() if '@' in OUTLOOK_EMAIL else '<empty>'}'")
@@ -265,18 +498,17 @@ def auto_classify():
 
             if not grouped:
                 yield _sse({"type": "done", "classified": 0, "errors": 0,
-                            "message": "No email groups found. Make sure Outlook is open."})
+                            "message": "No email groups found in the local cache. Click Refresh Emails to rebuild it."})
                 return
 
             # Build domain → messages lookup in one pass
             own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
             domain_msgs: dict[str, list] = {}
             for msg in messages:
-                _, from_addr = parse_email_address(msg.get("from"))
-                d = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
-                if not d or d == own_domain:
-                    continue
-                domain_msgs.setdefault(d, []).append(msg)
+                for d in external_domains_for_message(msg):
+                    if not d or d == own_domain:
+                        continue
+                    domain_msgs.setdefault(d, []).append(msg)
 
             total = len(grouped)
             print(f"[auto-classify] classifying {total} domains with {OLLAMA_MODEL}")
@@ -300,6 +532,7 @@ def auto_classify():
 
                 try:
                     result = classify_domain_emails(domain, msgs, contacts)
+                    result["_Domain"] = domain
 
                     # Carry over last email date from grouped data
                     if group.get("last_email_date") and not result.get("Last Email Date"):
@@ -361,11 +594,18 @@ def get_config():
     return jsonify({
         "ollama_host":  OLLAMA_HOST,
         "ollama_model": OLLAMA_MODEL,
+        "follow_up_days": FOLLOW_UP_DAYS,
     })
 
 
 @app.route("/")
 def index():
+    return render_template("index.html")
+
+
+@app.route("/deal/company/<path:deal_key>")
+@app.route("/deal/domain/<path:deal_key>")
+def deal_page(deal_key):
     return render_template("index.html")
 
 

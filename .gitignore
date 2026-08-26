@@ -7,3 +7,6 @@ venv/
 *.egg-info/
 dist/
 .DS_Store
+FundraisingTracker.xlsx
+email_cache.json
+email_cache.json.*.tmp

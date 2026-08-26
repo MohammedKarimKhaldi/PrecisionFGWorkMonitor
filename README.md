@@ -1,14 +1,15 @@
 # PrecisionFG Fundraising Email Monitor
 
-A web app (open in Chrome) that reads your Outlook inbox via **IMAP** and tracks
+A web app (open in Chrome) that reads your Outlook inbox via **Outlook for Mac** and tracks
 fundraising mandate discussions with asset managers in a **local Excel workbook**.
 
 No Azure App registration required.
 
 ## Features
 
-- **Outlook integration** — reads inbox + sent items via standard IMAP protocol
+- **Outlook integration** — reads inbox + sent items from the local Outlook desktop app
 - **Pipeline dashboard** — companies with status badges, contact, mandate type, AUM
+- **Workflow queue** — highlights who needs a reply, who has not answered, and recent meeting signals
 - **Status tracking** — 10-stage pipeline from Initial Contact to Closed
 - **Email thread view** — click any company to see matching email exchange
 - **Local Excel workbook** — auto-created as `FundraisingTracker.xlsx`; two sheets: *Companies* and *Email Log*
@@ -17,17 +18,11 @@ No Azure App registration required.
 
 ## Setup
 
-### 1. Enable IMAP in Outlook
+### 1. Open Outlook for Mac
 
-**Outlook.com / Hotmail / Live (personal account)**
-1. Go to Outlook.com → Settings → Mail → Sync email → POP and IMAP
-2. Enable IMAP access
-3. If you have 2-factor authentication: go to [account.microsoft.com/security](https://account.microsoft.com/security) → Advanced security → App passwords → create one
-
-**Microsoft 365 work account**
-- IMAP server: `outlook.office365.com`
-- Basic auth must be enabled for your mailbox by your IT admin, or use an app password
-- Ask your IT department to enable "Authenticated SMTP" / IMAP for your account
+The app reads local Outlook data through macOS automation. Keep Outlook open when
+refreshing emails. If Outlook blocks automation, allow Terminal or your IDE in
+macOS System Settings → Privacy & Security → Automation.
 
 ### 2. Configure
 
@@ -39,9 +34,9 @@ Edit `.env`:
 
 ```
 OUTLOOK_EMAIL=you@company.com
-OUTLOOK_PASSWORD=your-app-password
-# IMAP_SERVER=outlook.office365.com   ← override if auto-detection fails
 EXCEL_FILE_PATH=./FundraisingTracker.xlsx
+EMAIL_CACHE_PATH=./email_cache.json
+FOLLOW_UP_DAYS=5
 ```
 
 ### 3. Install & run
@@ -67,6 +62,12 @@ To share it with colleagues, point `EXCEL_FILE_PATH` to a shared network drive.
 
 Status colours are applied automatically.
 
+## Email Cache
+
+Email summaries are saved locally at `EMAIL_CACHE_PATH` after you click
+**Refresh Emails**. Normal page loads use that file only, so restarting the app is
+fast and does not re-query Outlook.
+
 ## Pipeline Statuses
 
 | Status | Meaning |
@@ -81,3 +82,16 @@ Status colours are applied automatically.
 | Not Interested | Declined |
 | Closed – Won | Mandate executed |
 | Closed – Lost | Deal did not close |
+
+## Workflow Labels
+
+These labels are computed from the latest matched Outlook thread and do not replace
+the Excel deal stage.
+
+| Label | Meaning |
+|---|---|
+| Needs reply | Their latest email is newer than yours |
+| No answer yet | Your latest email is older than `FOLLOW_UP_DAYS` |
+| Waiting | Your latest email is still within the follow-up window |
+| Meeting signal | A recent call, meeting, Zoom, Teams, accepted, or tentative invite was found |
+| No email found | The company has no matched email thread yet |

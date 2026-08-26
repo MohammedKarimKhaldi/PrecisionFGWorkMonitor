@@ -105,7 +105,7 @@
       <div class="stats-bar" id="stats-bar"></div>
 
       <!-- Action bar -->
-      <div class="card">
+      <div class="card" id="action-card">
         <div class="card-body" style="padding:14px 20px">
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
             <button class="btn btn-primary" onclick="openAddModal()">+ Add Company</button>
@@ -116,11 +116,24 @@
                     title="Fetch all email exchanges and classify deals with AI">✦ Auto-classify All</button>
             <div class="search-bar" style="margin-left:auto">
               <input id="search-input" type="search" placeholder="Search companies…" oninput="onSearch()" style="width:220px" />
+              <select id="filter-workflow" onchange="onFilterChange()" style="width:155px">
+                <option value="">All Actions</option>
+              </select>
               <select id="filter-status" onchange="onFilterChange()" style="width:165px">
                 <option value="">All Statuses</option>
               </select>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Workflow queue -->
+      <div class="card workflow-board" id="workflow-card">
+        <div class="card-header">
+          <h2>Action Queue</h2>
+        </div>
+        <div id="focus-queue" class="focus-list">
+          <div class="empty-state compact">Loading…</div>
         </div>
       </div>
 
@@ -141,7 +154,7 @@
       </div>
 
       <!-- Companies table -->
-      <div class="card">
+      <div class="card" id="pipeline-card">
         <div class="card-header">
           <h2>Pipeline</h2>
         </div>
@@ -150,16 +163,17 @@
             <thead>
               <tr>
                 <th>Company</th>
+                <th>Workflow</th>
+                <th>Deal Stage</th>
                 <th>Contact</th>
-                <th>Status</th>
-                <th>Last Email</th>
-                <th>Mandate Type</th>
-                <th>AUM</th>
+                <th>Last Touch</th>
+                <th>Next Action</th>
+                <th>Mandate</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody id="companies-tbody">
-              <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+              <tr><td colspan="8" class="empty-state">Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -168,14 +182,24 @@
       <!-- Company detail panel -->
       <div class="card" id="company-detail" style="display:none">
         <div class="card-header">
+          <a class="btn btn-outline btn-sm" id="detail-back-link" href="/" style="display:none">Pipeline</a>
           <h2 id="detail-title">Company</h2>
           <span id="detail-status"></span>
           <button class="btn btn-outline btn-sm" id="detail-edit-btn">Edit</button>
           <button class="btn btn-primary btn-sm" id="detail-status-btn">Change Status</button>
+          <button class="btn btn-outline btn-sm" id="detail-classify-btn">Classify</button>
           <button class="btn btn-outline btn-sm" id="detail-log-btn">Log emails to Excel</button>
         </div>
         <div class="card-body">
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:20px">
+          <div class="detail-meta-grid">
+            <div>
+              <div class="meta-label">Workflow</div>
+              <div id="detail-workflow" class="meta-value"></div>
+            </div>
+            <div>
+              <div class="meta-label">Next Action</div>
+              <div id="detail-next-action" class="meta-value"></div>
+            </div>
             <div>
               <div class="meta-label">Contact</div>
               <div id="detail-contact" class="meta-value"></div>
@@ -196,17 +220,95 @@
               <div class="meta-label">Last Email</div>
               <div id="detail-last" class="meta-value"></div>
             </div>
+            <div>
+              <div class="meta-label">Domain</div>
+              <div id="detail-domain" class="meta-value"></div>
+            </div>
+          </div>
+          <div style="margin-bottom:20px">
+            <div class="meta-label">Workflow Reason</div>
+            <div id="detail-workflow-reason" class="meta-value"></div>
           </div>
           <div style="margin-bottom:20px">
             <div class="meta-label">Notes</div>
             <div id="detail-notes" class="meta-value" style="white-space:pre-wrap"></div>
           </div>
-          <div class="meta-label" style="margin-bottom:10px">Email Thread</div>
+
+          <div class="detail-editor" id="detail-editor">
+            <div class="detail-editor-header">
+              <h3>Deal Correction</h3>
+              <span id="detail-editor-source"></span>
+            </div>
+            <form id="form-detail" onsubmit="event.preventDefault();submitDetailUpdate()">
+              <input type="hidden" name="original_company" />
+              <input type="hidden" name="source" />
+              <div class="form-row">
+                <div class="form-group" style="flex:2">
+                  <label>Deal Name *</label>
+                  <input name="company" required />
+                </div>
+                <div class="form-group">
+                  <label>Status</label>
+                  <select name="status"></select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Contact Name</label>
+                  <input name="contact_name" />
+                </div>
+                <div class="form-group">
+                  <label>Contact Email</label>
+                  <input name="contact_email" type="email" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Mandate Type</label>
+                  <input name="mandate_type" />
+                </div>
+                <div class="form-group" style="flex:0.5">
+                  <label>AUM (M€)</label>
+                  <input name="aum" type="number" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Notes</label>
+                <textarea name="notes" rows="4"></textarea>
+              </div>
+              <div class="detail-form-actions">
+                <button type="submit" class="btn btn-primary">Save Corrections</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="thread-header">
+            <div>
+              <div class="meta-label">Email Thread</div>
+              <div id="thread-source" class="thread-source"></div>
+            </div>
+            <button class="btn btn-outline btn-sm" id="thread-live-btn">Search Outlook</button>
+          </div>
           <div id="emails-panel"></div>
         </div>
       </div>
 
     </main>
+  </div>
+</div>
+
+<!-- ── Modal: Email Content ── -->
+<div id="modal-email" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEmailModal()">
+  <div class="modal-box email-modal-box">
+    <div class="email-modal-header">
+      <div>
+        <div id="email-modal-direction"></div>
+        <h3 id="email-modal-subject">Email</h3>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="closeEmailModal()">Close</button>
+    </div>
+    <div class="email-modal-meta" id="email-modal-meta"></div>
+    <div class="email-modal-body" id="email-modal-body"></div>
   </div>
 </div>
 
@@ -223,6 +325,7 @@
       <div><strong>Email:</strong> <span id="settings-email"></span></div>
       <div><strong>Source:</strong> <span id="settings-imap"></span></div>
       <div><strong>Excel file:</strong> <span id="settings-excel" style="word-break:break-all"></span></div>
+      <div><strong>Follow-up after:</strong> <span id="settings-followup-days"></span> day(s)</div>
     </div>
     <div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;padding:12px;font-size:12px;line-height:1.6;margin-bottom:14px">
       Emails are read directly from <strong>Outlook for Mac</strong> — no passwords needed.
@@ -304,6 +407,7 @@
       <div class="form-row">
         <div class="form-group" style="flex:2">
           <label>Company Name *</label>
+          <input type="hidden" name="original_company" />
           <input name="company" required />
         </div>
       </div>

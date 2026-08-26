@@ -1,5 +1,6 @@
 """Manage a local Excel workbook for the fundraising pipeline."""
 import os
+import re
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -9,7 +10,6 @@ from config.settings import (
     EXCEL_COMPANIES_SHEET,
     EXCEL_EMAIL_LOG_SHEET,
     MANDATE_STATUSES,
-    OUTLOOK_EMAIL,
 )
 
 STATUS_COLORS = {
@@ -29,6 +29,14 @@ _HEADER_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
 _THIN        = Side(style="thin", color="FFFFFF")
 _BORDER      = Border(left=_THIN, right=_THIN)
+_EMAIL_RE    = re.compile(r"[a-z0-9._%+-]+@([a-z0-9.-]+\.[a-z]{2,})", re.I)
+_DOMAIN_RE   = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$", re.I)
+_GENERIC_COMPANY_WORDS = {
+    "asset", "assets", "management", "capital", "partners", "partner",
+    "group", "holdings", "holding", "limited", "ltd", "llc", "inc", "plc",
+    "fund", "funds", "ventures", "venture", "family", "office",
+    "investment", "investments",
+}
 
 
 def _write_headers(ws, headers):
@@ -80,6 +88,125 @@ def _save(wb):
     wb.save(os.path.abspath(EXCEL_FILE_PATH))
 
 
+def _is_blank(value):
+    return value is None or str(value).strip() == ""
+
+
+def _normalize_key(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _company_tokens(value):
+    tokens = [
+        token for token in re.sub(r"[^a-z0-9]", " ", str(value or "").lower()).split()
+        if len(token) > 2 and token not in _GENERIC_COMPANY_WORDS
+    ]
+    expanded = set(tokens)
+    for token in tokens:
+        if token.endswith("ical") and len(token) > 6:
+            expanded.add(token[:-4])
+        if token.endswith("medical") and len(token) > 8:
+            expanded.add(token[:-7] + "med")
+    return expanded
+
+
+def _name_matches_domain(name, domain):
+    domain_base = _normalize_key(str(domain or "").split(".")[0])
+    if not domain_base:
+        return False
+    name_key = _normalize_key(name)
+    if name_key == domain_base:
+        return True
+    return any(
+        token and len(token) > 4 and (domain_base.startswith(token) or token.startswith(domain_base))
+        for token in _company_tokens(name)
+    )
+
+
+def _email_domain(value):
+    """Return an email/domain value's normalized domain, if one is present."""
+    text = str(value or "").strip().lower()
+    match = _EMAIL_RE.search(text)
+    if match:
+        return match.group(1).strip(".").lower()
+    if _DOMAIN_RE.match(text):
+        return text.strip(".").lower()
+    return ""
+
+
+def _row_to_dict(headers, row):
+    return {h: row[i].value for i, h in enumerate(headers) if h}
+
+
+def _company_name_score(name, domain=""):
+    name = str(name or "").strip()
+    if not name:
+        return 0
+    compact = _normalize_key(name)
+    domain_base = _normalize_key((domain or "").split(".")[0])
+    score = len(compact)
+    if " " in name:
+        score += 25
+    if domain_base and compact == domain_base:
+        score -= 20
+    return score
+
+
+def _best_company_name(existing, incoming, domain=""):
+    if _is_blank(existing):
+        return incoming
+    if _is_blank(incoming):
+        return existing
+    if _company_name_score(incoming, domain) > _company_name_score(existing, domain):
+        return incoming
+    return existing
+
+
+def _date_value(value):
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("T", " ").replace("Z", "")
+    for fmt, length in (
+        ("%Y-%m-%d %H:%M:%S", 19),
+        ("%Y-%m-%d %H:%M", 16),
+        ("%Y-%m-%d", 10),
+    ):
+        try:
+            return datetime.strptime(text[:length], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _merge_domain_match_data(data, existing, headers, domain):
+    """Merge an incoming auto-classification with an existing same-domain row.
+
+    Domain matches often mean the model inferred a shorter name from the email
+    domain, while the workbook may already contain a manually corrected name.
+    Preserve richer existing values when the incoming payload is blank, and keep
+    the better display name instead of creating a second deal.
+    """
+    merged = dict(data)
+    merged["Company"] = _best_company_name(existing.get("Company"), data.get("Company"), domain)
+
+    for h in headers:
+        if h not in merged or h == "Company":
+            continue
+        incoming = merged.get(h)
+        current = existing.get(h)
+        if _is_blank(incoming) and not _is_blank(current):
+            merged.pop(h, None)
+        elif h == "Last Email Date":
+            incoming_date = _date_value(incoming)
+            current_date = _date_value(current)
+            if current_date and (not incoming_date or current_date > incoming_date):
+                merged[h] = current
+    return merged
+
+
 def _apply_row_color(ws, row_num, col_count, status):
     color = STATUS_COLORS.get(status, "FFFFFF")
     fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
@@ -103,18 +230,47 @@ def get_companies():
     return rows
 
 
-def upsert_company(data):
-    """Insert or update a company row matched by name."""
+def upsert_company(data, match_name=None):
+    """Insert or update a company row.
+
+    Existing rows are matched by ``match_name`` when supplied, by the incoming
+    Company value, or by the contact/domain carried by the email thread. This
+    lets the UI rename a deal without leaving the old company row behind, and
+    prevents domain-derived aliases from creating duplicate deals.
+    """
+    data = dict(data)
     wb = _load_or_create()
     ws = wb[EXCEL_COMPANIES_SHEET]
     headers = [c.value for c in ws[1]]
     data["Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     target = None
+    lookup_names = [
+        str(name).strip().lower()
+        for name in (match_name, data.get("Company", ""))
+        if str(name or "").strip()
+    ]
+    incoming_domain = (
+        _email_domain(data.get("_Domain")) or
+        _email_domain(data.get("Domain")) or
+        _email_domain(data.get("Contact Email"))
+    )
+
     for row in ws.iter_rows(min_row=2):
-        if row[0].value and row[0].value.strip().lower() == data.get("Company", "").strip().lower():
+        row_name = str(row[0].value or "").strip().lower()
+        if row_name and row_name in lookup_names:
             target = row[0].row
             break
+
+    if not target and incoming_domain:
+        email_idx = headers.index("Contact Email") if "Contact Email" in headers else None
+        for row in ws.iter_rows(min_row=2):
+            row_domain = _email_domain(row[email_idx].value) if email_idx is not None else ""
+            if (row_domain and row_domain == incoming_domain) or _name_matches_domain(row[0].value, incoming_domain):
+                target = row[0].row
+                existing = _row_to_dict(headers, row)
+                data = _merge_domain_match_data(data, existing, headers, incoming_domain)
+                break
 
     if target:
         for col, h in enumerate(headers, 1):
@@ -126,7 +282,9 @@ def upsert_company(data):
         ws.append([data.get(h, "") for h in headers])
         target = ws.max_row
 
-    _apply_row_color(ws, target, len(headers), data.get("Status", ""))
+    status_col = headers.index("Status") + 1 if "Status" in headers else 0
+    status = ws.cell(row=target, column=status_col).value if status_col else data.get("Status", "")
+    _apply_row_color(ws, target, len(headers), status or "")
     _save(wb)
 
 
@@ -146,19 +304,19 @@ def log_emails(emails, company_name):
         str(row[6]) for row in ws.iter_rows(min_row=2, values_only=True) if row[6]
     }
 
-    own = OUTLOOK_EMAIL.lower()
     added = 0
     for em in emails:
         msg_id = str(em.get("id") or "")
         if msg_id and msg_id in existing_ids:
             continue
-        ea = (em.get("from") or {}).get("emailAddress", {})
-        from_addr = ea.get("address", "")
-        direction = "OUT" if own in from_addr.lower() else "IN"
+        contact = (em.get("external_participants") or [em.get("from") or {}])[0]
+        ea = (contact or {}).get("emailAddress", {})
+        contact_addr = ea.get("address", "")
+        direction = em.get("direction") or ("OUT" if (em.get("folder") or "").lower() == "sent" else "IN")
         ws.append([
             (em.get("receivedDateTime") or "")[:10],
             company_name,
-            f"{ea.get('name', '')} <{from_addr}>".strip(),
+            f"{ea.get('name', '')} <{contact_addr}>".strip(),
             direction,
             em.get("subject", ""),
             (em.get("bodyPreview") or "")[:200],

@@ -26,10 +26,38 @@ const state = {
   emailsGrouped: [],
   emailsTotal:   0,
   cachedAt:      0,
+  followUpDays:  5,
   statuses:      [],
+  workflowFilter: '',
   selectedCompany: null,
+  selectedDeal: null,
   currentEmails: [],
+  route: null,
 };
+
+const WORKFLOW = {
+  needs_reply: { label: 'Needs reply',     stat: 'Needs Reply', color: '#b3261e' },
+  no_answer:   { label: 'No answer yet',   stat: 'No Answer',   color: '#b06000' },
+  meeting:     { label: 'Meeting signal',  stat: 'Meetings',    color: '#1b6f43' },
+  waiting:     { label: 'Waiting',         stat: 'Waiting',     color: '#1565c0' },
+  no_email:    { label: 'No email found',  stat: 'No Email',    color: '#6c757d' },
+  closed:      { label: 'Closed/paused',   stat: 'Closed',      color: '#555' },
+};
+
+const WORKFLOW_RANK = {
+  needs_reply: 1,
+  no_answer: 2,
+  meeting: 3,
+  waiting: 4,
+  no_email: 8,
+  closed: 9,
+};
+
+const GENERIC_COMPANY_WORDS = new Set([
+  'asset', 'assets', 'management', 'capital', 'partners', 'partner', 'group',
+  'holdings', 'holding', 'limited', 'ltd', 'llc', 'inc', 'plc', 'fund', 'funds',
+  'ventures', 'venture', 'family', 'office', 'investment', 'investments',
+]);
 
 // ── Toast ──────────────────────────────────────────────────────────────────
 function toast(msg, type = '') {
@@ -42,19 +70,25 @@ function toast(msg, type = '') {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
+  state.route = parseDealRoute();
+  applyRouteChrome();
+
   const [statusData, apiStatus] = await Promise.all([
     fetch('/api/statuses').then(r => r.json()),
     fetch('/api/status').then(r => r.json()),
   ]);
 
   state.statuses = statusData.statuses || [];
+  state.followUpDays = apiStatus.follow_up_days || 5;
   populateFilterDropdown();
+  populateWorkflowDropdown();
 
   document.getElementById('user-info').textContent = apiStatus.email || '';
   document.getElementById('settings-email').textContent = apiStatus.email || '—';
 
   await Promise.all([loadCompanies(), loadEmails()]);
   renderAll();
+  openRouteDeal();
 }
 
 // ── Data loaders ───────────────────────────────────────────────────────────
@@ -76,8 +110,11 @@ async function loadEmails(forceRefresh = false) {
     state.emailsGrouped = data.grouped   || [];
     state.emailsTotal   = data.total     || state.emails.length;
     state.cachedAt      = data.cached_at || 0;
-    const badge = _cacheAgeBadge(state.cachedAt);
-    setConnBadge('ok', badge);
+    if (data.needs_refresh) {
+      setConnBadge('unknown', '● emails: refresh needed');
+    } else {
+      setConnBadge('ok', _cacheAgeBadge(state.cachedAt));
+    }
   } catch (e) {
     setConnBadge('error', '● error');
     toast('Email load failed: ' + e.message, 'error');
@@ -99,41 +136,407 @@ function setConnBadge(type, text) {
   b.textContent = text;
 }
 
+// ── Routing ────────────────────────────────────────────────────────────────
+function parseDealRoute() {
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  if (parts[0] !== 'deal' || !parts[1] || !parts[2]) return null;
+  return {
+    type: parts[1],
+    key: decodeURIComponent(parts.slice(2).join('/')),
+  };
+}
+
+function isDealPage() {
+  return Boolean(state.route);
+}
+
+function applyRouteChrome() {
+  document.body.classList.toggle('deal-page', isDealPage());
+  const back = document.getElementById('detail-back-link');
+  if (back) back.style.display = isDealPage() ? '' : 'none';
+}
+
+function dealHref(row) {
+  if (row?.source === 'email' && row.domain) {
+    return `/deal/domain/${encodeURIComponent(row.domain)}`;
+  }
+  return `/deal/company/${encodeURIComponent(row?.name || '')}`;
+}
+
+function isSelectedRow(row) {
+  if (!state.selectedDeal || !row) return state.selectedCompany === row?.name;
+  if (state.selectedDeal.domain && row.domain && state.selectedDeal.domain === row.domain) return true;
+  return state.selectedDeal.name === row.name;
+}
+
+function findRouteDealRow() {
+  if (!state.route) return null;
+  const rows = buildWorkflowRows();
+  if (state.route.type === 'domain') {
+    return rows.find(r => (r.domain || '').toLowerCase() === state.route.key.toLowerCase()) || null;
+  }
+  const exact = rows.find(r => r.name === state.route.key) ||
+    rows.find(r => normalizeKey(r.name) === normalizeKey(state.route.key));
+  if (exact) return exact;
+
+  const saved = state.companies.find(c => c['Company'] === state.route.key) ||
+    state.companies.find(c => normalizeKey(c['Company']) === normalizeKey(state.route.key));
+  const group = saved ? findGroupForCompany(saved) : null;
+  if (group?.domain) {
+    return rows.find(r => (r.domain || '').toLowerCase() === group.domain.toLowerCase()) || null;
+  }
+  return null;
+}
+
+function openRouteDeal() {
+  if (!isDealPage()) return;
+  const row = findRouteDealRow();
+  if (row) {
+    showDealDetail(row, { scroll: false });
+    return;
+  }
+
+  const panel = document.getElementById('company-detail');
+  panel.style.display = 'block';
+  document.getElementById('detail-title').textContent = 'Deal not found';
+  document.getElementById('detail-status').innerHTML = '';
+  document.getElementById('emails-panel').innerHTML =
+    '<div class="empty-state">This deal is not in the current Excel file or email cache.</div>';
+  document.getElementById('detail-editor').style.display = 'none';
+  ['detail-edit-btn', 'detail-status-btn', 'detail-classify-btn', 'detail-log-btn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.style.display = 'none';
+  });
+}
+
 // ── Render ─────────────────────────────────────────────────────────────────
 function renderAll() {
+  applyRouteChrome();
   renderStats();
+  renderFocusQueue();
   renderSidebar();
   renderCompaniesTable();
 }
 
-function renderStats() {
-  const counts = {};
-  state.statuses.forEach(s => counts[s] = 0);
-  state.companies.forEach(c => {
-    const s = c['Status'] || '';
-    if (s) counts[s] = (counts[s] || 0) + 1;
+// ── Workflow model ────────────────────────────────────────────────────────
+function buildWorkflowRows({ includeEmailOnly = true, sortBy = 'recent' } = {}) {
+  const usedDomains = new Set();
+  const rows = state.companies.map(company => {
+    const group = findGroupForCompany(company);
+    const row = buildWorkflowRow(company, group, 'excel');
+    if (row.domain) usedDomains.add(row.domain);
+    return row;
   });
 
+  if (includeEmailOnly) {
+    state.emailsGrouped.forEach(group => {
+      if (usedDomains.has(group.domain)) return;
+      rows.push(buildWorkflowRow(groupToCompany(group), group, 'email'));
+    });
+  }
+
+  return dedupeWorkflowRows(rows).sort(sortBy === 'workflow' ? sortByWorkflowPriority : sortByMostRecent);
+}
+
+function dedupeWorkflowRows(rows) {
+  const byDomain = new Map();
+  const withoutDomain = [];
+
+  rows.forEach(row => {
+    const key = (row.domain || '').toLowerCase();
+    if (!key) {
+      withoutDomain.push(row);
+      return;
+    }
+    const existing = byDomain.get(key);
+    if (!existing || rowQualityScore(row) > rowQualityScore(existing)) {
+      byDomain.set(key, row);
+    }
+  });
+
+  return [...byDomain.values(), ...withoutDomain];
+}
+
+function rowQualityScore(row) {
+  const c = row.company || {};
+  const filledFields = ['Contact Name', 'Contact Email', 'Status', 'Mandate Type', 'AUM (M€)', 'Notes']
+    .filter(key => String(c[key] || '').trim()).length;
+  return (
+    (row.source === 'excel' ? 1000 : 0) +
+    companyNameQuality(row.name, row.domain) +
+    filledFields * 10 +
+    Math.min(row.messageCount || 0, 40)
+  );
+}
+
+function companyNameQuality(name, domain) {
+  const clean = String(name || '').trim();
+  if (!clean) return 0;
+  const compact = normalizeKey(clean);
+  const domainBase = normalizeKey((domain || '').split('.')[0]);
+  let score = compact.length;
+  if (/\s/.test(clean)) score += 25;
+  if (domainBase && compact === domainBase) score -= 20;
+  return score;
+}
+
+function sortByMostRecent(a, b) {
+  const aTime = dateSortValue(a.lastDate);
+  const bTime = dateSortValue(b.lastDate);
+  if (aTime !== bTime) return bTime - aTime;
+  return String(a.name || '').localeCompare(String(b.name || ''));
+}
+
+function sortByWorkflowPriority(a, b) {
+  if (a.rank !== b.rank) return a.rank - b.rank;
+  if (a.workflowState === 'no_answer' && b.workflowState === 'no_answer') {
+    return (b.daysSinceLast ?? -1) - (a.daysSinceLast ?? -1);
+  }
+  return sortByMostRecent(a, b);
+}
+
+function dateSortValue(value) {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function buildWorkflowRow(company, group, source) {
+  const status = company['Status'] || '';
+  const lastDate = group?.last_email_date || company['Last Email Date'] || '';
+  const days = daysSince(lastDate);
+  const direction = group?.latest_direction || '';
+  const meeting = getMeetingInfo(group);
+  const isClosed = isClosedStatus(status);
+
+  let workflowState = 'no_email';
+  if (isClosed) {
+    workflowState = 'closed';
+  } else if (meeting && meeting.signal !== 'cancelled' && meeting.daysSince <= 45) {
+    workflowState = 'meeting';
+  } else if (direction === 'IN') {
+    workflowState = 'needs_reply';
+  } else if (direction === 'OUT') {
+    workflowState = days !== null && days >= state.followUpDays ? 'no_answer' : 'waiting';
+  } else if (group) {
+    workflowState = 'waiting';
+  }
+
+  const workflow = WORKFLOW[workflowState] || WORKFLOW.no_email;
+  return {
+    company,
+    source,
+    name: company['Company'] || group?.domain || '',
+    status,
+    group,
+    domain: group?.domain || getEmailDomain(company['Contact Email']) || '',
+    workflowState,
+    workflowLabel: workflow.label,
+    workflowColor: workflow.color,
+    rank: WORKFLOW_RANK[workflowState] || 10,
+    nextAction: nextActionFor(workflowState, days, meeting),
+    reason: reasonFor(workflowState, days, meeting, direction),
+    lastDate,
+    lastDateLabel: formatDateShort(lastDate),
+    daysSinceLast: days,
+    direction,
+    latestSubject: group?.latest_subject || '',
+    latestContact: group?.latest_contact || company['Contact Email'] || '',
+    messageCount: group?.message_count || 0,
+    meeting,
+  };
+}
+
+function groupToCompany(group) {
+  const contact = (group.contacts || [])[0] || '';
+  const match = contact.match(/<([^>]+)>/);
+  const email = match ? match[1] : (contact.includes('@') ? contact.split(' ').pop() : '');
+  return {
+    Company: titleFromDomain(group.domain),
+    'Contact Name': contact.replace(/<[^>]+>/, '').trim(),
+    'Contact Email': email,
+    Status: '',
+    'Last Email Date': group.last_email_date || '',
+  };
+}
+
+function findGroupForCompany(company) {
+  const contactDomain = getEmailDomain(company['Contact Email']);
+  if (contactDomain) {
+    const exact = state.emailsGrouped.find(g => g.domain === contactDomain);
+    if (exact) return exact;
+  }
+
+  const nameTokens = significantTokens(company['Company']);
+  if (!nameTokens.length) return null;
+
+  return state.emailsGrouped.find(group => {
+    const domainBase = normalizeKey((group.domain || '').split('.')[0]);
+    if (!domainBase) return false;
+    return nameTokens.some(token => domainBase.includes(token) || token.includes(domainBase));
+  }) || null;
+}
+
+function getMeetingInfo(group) {
+  if (!group?.latest_meeting_subject) return null;
+  const days = daysSince(group.latest_meeting_date);
+  return {
+    signal: group.latest_meeting_signal || 'scheduled',
+    subject: group.latest_meeting_subject || '',
+    date: group.latest_meeting_date || '',
+    folder: group.latest_meeting_folder || '',
+    direction: (group.latest_meeting_folder || '').toLowerCase() === 'sent' ? 'OUT' : 'IN',
+    daysSince: days ?? 999,
+  };
+}
+
+function nextActionFor(stateName, days, meeting) {
+  if (stateName === 'needs_reply') return 'Reply to them';
+  if (stateName === 'no_answer') return 'Send follow-up';
+  if (stateName === 'meeting') {
+    if (meeting?.signal === 'accepted') return 'Prepare meeting';
+    if (meeting?.signal === 'tentative') return 'Confirm meeting';
+    return 'Check meeting';
+  }
+  if (stateName === 'waiting') {
+    const left = Math.max(0, state.followUpDays - (days || 0));
+    return left ? `Wait ${left}d` : 'Monitor';
+  }
+  if (stateName === 'no_email') return 'Start outreach';
+  return 'No action';
+}
+
+function reasonFor(stateName, days, meeting, direction) {
+  if (stateName === 'needs_reply') return `They wrote ${ageLabel(days)}`;
+  if (stateName === 'no_answer') return `You sent ${ageLabel(days)} with no reply`;
+  if (stateName === 'meeting') return `${meetingLabel(meeting?.signal)} ${ageLabel(meeting?.daysSince)}`;
+  if (stateName === 'waiting') return direction === 'OUT' ? `You sent ${ageLabel(days)}` : 'Recent thread';
+  if (stateName === 'no_email') return 'No matched thread';
+  return 'Deal is closed or paused';
+}
+
+function isClosedStatus(status) {
+  return ['Closed – Won', 'Closed – Lost', 'Not Interested', 'On Hold'].includes(status || '');
+}
+
+function meetingLabel(signal) {
+  if (signal === 'accepted') return 'Meeting accepted';
+  if (signal === 'tentative') return 'Tentative meeting';
+  if (signal === 'cancelled') return 'Meeting cancelled';
+  return 'Meeting noted';
+}
+
+function getEmailDomain(email) {
+  const raw = (email || '').toLowerCase().trim();
+  const match = raw.match(/[a-z0-9._%+-]+@([a-z0-9.-]+\.[a-z]{2,})/);
+  return match ? match[1] : '';
+}
+
+function normalizeKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function significantTokens(value) {
+  const tokens = String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(token => token.length > 2 && !GENERIC_COMPANY_WORDS.has(token));
+  const expanded = new Set(tokens);
+  tokens.forEach(token => {
+    if (token.endsWith('ical') && token.length > 6) expanded.add(token.slice(0, -4));
+    if (token.endsWith('medical') && token.length > 8) expanded.add(`${token.slice(0, -7)}med`);
+  });
+  return [...expanded];
+}
+
+function daysSince(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return Math.max(0, Math.floor((Date.now() - date.getTime()) / 86400000));
+}
+
+function ageLabel(days) {
+  if (days === null || days === undefined || days === 999) return '';
+  if (days <= 0) return 'today';
+  if (days === 1) return '1 day ago';
+  return `${days} days ago`;
+}
+
+function formatDateShort(value) {
+  if (!value) return '—';
+  return String(value).replace('T', ' ').slice(0, 16);
+}
+
+function titleFromDomain(domain) {
+  const first = (domain || '').split('.')[0] || '';
+  return first
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map(s => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(' ') || domain;
+}
+
+function workflowChip(row) {
+  return `<span class="workflow-pill workflow-${row.workflowState}">${esc(row.workflowLabel)}</span>`;
+}
+
+function directionBadge(direction) {
+  if (direction === 'OUT') return '<span class="dir-out">OUT</span>';
+  if (direction === 'IN') return '<span class="dir-in">IN</span>';
+  return '';
+}
+
+function renderStats() {
+  const rows = buildWorkflowRows();
+  const counts = rows.reduce((acc, row) => {
+    acc[row.workflowState] = (acc[row.workflowState] || 0) + 1;
+    return acc;
+  }, {});
+  const activeDeals = buildWorkflowRows({ includeEmailOnly: false })
+    .filter(row => !isClosedStatus(row.status)).length;
+
   const highlights = [
-    { label: 'Total',     val: state.companies.length,
-      color: '#2E75B6' },
-    { label: 'Active',    val: (counts['In Discussion']||0)+(counts['Follow Up']||0)+(counts['Due Diligence']||0),
-      color: '#1565C0' },
-    { label: 'Proposals', val: counts['Proposal Sent'] || 0,
-      color: '#2e7d32' },
-    { label: 'Mandates',  val: (counts['Mandate Received']||0)+(counts['Closed – Won']||0),
-      color: '#1B5E20' },
-    { label: 'Lost',      val: (counts['Not Interested']||0)+(counts['Closed – Lost']||0),
-      color: '#c62828' },
-    { label: 'Emails',    val: state.emailsTotal,
-      color: '#6a1b9a' },
+    { label: WORKFLOW.needs_reply.stat, val: counts.needs_reply || 0, color: WORKFLOW.needs_reply.color, filter: 'needs_reply' },
+    { label: WORKFLOW.no_answer.stat,   val: counts.no_answer || 0,   color: WORKFLOW.no_answer.color,   filter: 'no_answer' },
+    { label: WORKFLOW.meeting.stat,     val: counts.meeting || 0,     color: WORKFLOW.meeting.color,     filter: 'meeting' },
+    { label: WORKFLOW.waiting.stat,     val: counts.waiting || 0,     color: WORKFLOW.waiting.color,     filter: 'waiting' },
+    { label: 'Active Deals',            val: activeDeals,             color: '#2E75B6',                  filter: '' },
+    { label: 'Emails',                  val: state.emailsTotal,       color: '#6a1b9a',                  filter: '' },
   ];
 
   document.getElementById('stats-bar').innerHTML = highlights.map(h => `
-    <div class="stat-card">
+    <div class="stat-card ${state.workflowFilter === h.filter && h.filter ? 'active' : ''}"
+         onclick="setWorkflowFilter(${JSON.stringify(h.filter)})">
       <div class="stat-val" style="color:${h.color}">${h.val}</div>
       <div class="stat-label">${h.label}</div>
     </div>`).join('');
+}
+
+function renderFocusQueue() {
+  const el = document.getElementById('focus-queue');
+  if (!el) return;
+
+  const rows = buildWorkflowRows({ sortBy: 'workflow' })
+    .filter(row => ['needs_reply', 'no_answer', 'meeting'].includes(row.workflowState))
+    .slice(0, 8);
+
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty-state compact">No urgent workflow items.</div>';
+    return;
+  }
+
+  el.innerHTML = rows.map(row => `
+    <a class="focus-row" href="${esc(dealHref(row))}">
+      <div class="focus-main">
+        <strong>${esc(row.name)}</strong>
+        <span class="focus-reason">${directionBadge(row.direction)} ${esc(row.reason)}</span>
+      </div>
+      <div class="focus-status">${workflowChip(row)}</div>
+      <div class="focus-action">${esc(row.nextAction)}</div>
+      <div class="focus-date">${esc(row.lastDateLabel)}</div>
+    </a>
+  `).join('');
 }
 
 function renderSidebar() {
@@ -143,151 +546,406 @@ function renderSidebar() {
     list.innerHTML = '<div class="empty-state" style="padding:20px;font-size:12px">No companies yet.<br>Add one or refresh emails.</div>';
     return;
   }
-  list.innerHTML = combined.map(c => `
-    <div class="sidebar-item ${state.selectedCompany === c.name ? 'active' : ''}"
-         onclick="selectCompany(${JSON.stringify(c.name)})">
-      <div class="company-name">${esc(c.name)}</div>
+  list.innerHTML = combined.map(row => `
+    <a class="sidebar-item ${isSelectedRow(row) ? 'active' : ''}" href="${esc(dealHref(row))}">
+      <div class="company-name">${esc(row.name)}</div>
       <div class="company-meta">
-        ${c.status ? `<span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>` : ''}
-        ${c.emailCount ? ` · ${c.emailCount} emails` : ''}
-        ${c.lastDate ? ` · ${c.lastDate.slice(0,10)}` : ''}
+        ${workflowChip(row)}
+        ${row.messageCount ? ` · ${row.messageCount} emails` : ''}
+        ${row.lastDate ? ` · ${row.lastDate.slice(0,10)}` : ''}
       </div>
-    </div>`).join('');
+    </a>`).join('');
 }
 
 function mergeCompaniesWithEmails() {
-  const result = state.companies.map(c => ({
-    name:       c['Company'] || '',
-    status:     c['Status'] || '',
-    lastDate:   c['Last Email Date'] || '',
-    emailCount: null,
-    source:     'excel',
-  }));
-
-  const companyNames = new Set(state.companies.map(c => (c['Company'] || '').toLowerCase()));
-
-  state.emailsGrouped.forEach(g => {
-    const domainBase = g.domain.split('.')[0].toLowerCase();
-    const alreadyIn  = [...companyNames].some(n => n.includes(domainBase) || domainBase.includes(n.split(' ')[0]));
-    if (!alreadyIn) {
-      result.push({
-        name:       g.domain,
-        status:     '',
-        lastDate:   g.last_email_date,
-        emailCount: g.message_count,
-        source:     'email',
-      });
-    }
-  });
-
-  return result.sort((a, b) => (b.lastDate || '').localeCompare(a.lastDate || ''));
+  const rows = buildWorkflowRows({ sortBy: 'recent' });
+  if (!state.workflowFilter) return rows;
+  return rows.filter(row => row.workflowState === state.workflowFilter);
 }
 
 function renderCompaniesTable() {
   const tbody    = document.getElementById('companies-tbody');
   const filterSt = document.getElementById('filter-status').value;
+  const filterWf = document.getElementById('filter-workflow')?.value || '';
   const searchQ  = document.getElementById('search-input').value.toLowerCase();
 
-  const filtered = state.companies.filter(c => {
-    if (filterSt && c['Status'] !== filterSt) return false;
+  const filtered = buildWorkflowRows({ includeEmailOnly: false, sortBy: 'recent' }).filter(row => {
+    const c = row.company;
+    if (filterSt && row.status !== filterSt) return false;
+    if (filterWf && row.workflowState !== filterWf) return false;
     if (searchQ) {
-      const haystack = ((c['Company']||'')+(c['Contact Name']||'')+(c['Contact Email']||'')).toLowerCase();
+      const haystack = [
+        c['Company'], c['Contact Name'], c['Contact Email'],
+        row.workflowLabel, row.reason, row.latestSubject, row.domain,
+      ].join(' ').toLowerCase();
       if (!haystack.includes(searchQ)) return false;
     }
     return true;
   });
 
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No companies match.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No companies match.</td></tr>';
     return;
   }
 
-  tbody.innerHTML = filtered.map(c => `
-    <tr>
-      <td><strong>${esc(c['Company']||'')}</strong></td>
-      <td>${esc(c['Contact Name']||'')}${c['Contact Email'] ? `<br><small style="color:#888">${esc(c['Contact Email'])}</small>` : ''}</td>
-      <td><span class="badge badge-${esc(c['Status']||'')}">${esc(c['Status']||'—')}</span></td>
-      <td>${esc(c['Last Email Date']||'—')}</td>
-      <td>${esc(c['Mandate Type']||'—')}</td>
-      <td>${c['AUM (M€)'] ? esc(c['AUM (M€)'])+'M€' : '—'}</td>
-      <td style="white-space:nowrap;display:flex;gap:4px">
-        <button class="btn btn-outline btn-sm" onclick="openEditModal(${JSON.stringify(c['Company']||'')})">Edit</button>
-        <button class="btn btn-primary btn-sm" onclick="openStatusModal(${JSON.stringify(c['Company']||'')},${JSON.stringify(c['Status']||'')})">Status</button>
+  tbody.innerHTML = filtered.map(row => {
+    const c = row.company;
+    const subject = row.latestSubject ? `<div class="muted-line">${esc(row.latestSubject.slice(0, 64))}</div>` : '';
+    const href = dealHref(row);
+    return `
+    <tr class="clickable-row" onclick="window.location.href='${esc(href)}'">
+      <td><a class="deal-link" href="${esc(href)}" onclick="event.stopPropagation()"><strong>${esc(c['Company']||'')}</strong></a></td>
+      <td>
+        ${workflowChip(row)}
+        <div class="muted-line">${esc(row.reason)}</div>
       </td>
-    </tr>`).join('');
+      <td><span class="badge badge-${esc(c['Status']||'')}">${esc(c['Status']||'—')}</span></td>
+      <td>${esc(c['Contact Name']||'')}${c['Contact Email'] ? `<br><small style="color:#888">${esc(c['Contact Email'])}</small>` : ''}</td>
+      <td>${directionBadge(row.direction)} ${esc(row.lastDateLabel)}${subject}</td>
+      <td><strong>${esc(row.nextAction)}</strong></td>
+      <td>${esc(c['Mandate Type']||'—')}${c['AUM (M€)'] ? `<br><small style="color:#888">${esc(c['AUM (M€)'])}M€</small>` : ''}</td>
+      <td style="white-space:nowrap;display:flex;gap:4px">
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openEditModal(${JSON.stringify(c['Company']||'')})">Edit</button>
+        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openStatusModal(${JSON.stringify(c['Company']||'')},${JSON.stringify(c['Status']||'')})">Status</button>
+      </td>
+    </tr>`;
+  }).join('');
 }
 
 // ── Company detail ─────────────────────────────────────────────────────────
 function selectCompany(name) {
-  state.selectedCompany = name;
+  const company = state.companies.find(c => c['Company'] === name);
+  const row = buildWorkflowRows().find(r => r.name === name) ||
+    (company ? buildWorkflowRow(company, findGroupForCompany(company), 'excel') : null);
+  if (row) showDealDetail(row, { scroll: true });
+}
+
+function showDealDetail(row, { scroll = false } = {}) {
+  state.selectedDeal = row;
+  state.selectedCompany = row.name;
   renderSidebar();
 
   const panel = document.getElementById('company-detail');
   panel.style.display = 'block';
-  document.getElementById('detail-title').textContent = name;
+  document.getElementById('detail-editor').style.display = '';
+  document.getElementById('detail-title').textContent = row.name;
 
-  const company = state.companies.find(c => c['Company'] === name);
-  if (company) {
-    document.getElementById('detail-status').innerHTML =
-      `<span class="badge badge-${esc(company['Status']||'')}">${esc(company['Status']||'—')}</span>`;
-    document.getElementById('detail-contact').textContent =
-      company['Contact Name'] ? `${company['Contact Name']} <${company['Contact Email']||''}>` : '—';
-    document.getElementById('detail-mandate').textContent = company['Mandate Type'] || '—';
-    document.getElementById('detail-aum').textContent     = company['AUM (M€)'] ? company['AUM (M€)'] + ' M€' : '—';
-    document.getElementById('detail-notes').textContent   = company['Notes'] || '—';
-    document.getElementById('detail-first').textContent   = company['First Contact Date'] || '—';
-    document.getElementById('detail-last').textContent    = company['Last Email Date'] || '—';
-  }
+  const company = state.companies.find(c => c['Company'] === row.name);
+  const detailCompany = company || row?.company || {};
 
-  document.getElementById('detail-edit-btn').onclick   = () => openEditModal(name);
-  document.getElementById('detail-status-btn').onclick = () => openStatusModal(name, company?.['Status'] || '');
-  document.getElementById('detail-log-btn').onclick    = () => logEmailsForCompany(name);
+  document.getElementById('detail-status').innerHTML =
+    `<span class="badge badge-${esc(detailCompany['Status']||'')}">${esc(detailCompany['Status']||'—')}</span>`;
+  document.getElementById('detail-workflow').innerHTML = row ? workflowChip(row) : '—';
+  document.getElementById('detail-next-action').textContent = row?.nextAction || '—';
+  document.getElementById('detail-workflow-reason').textContent = row?.reason || '—';
+  document.getElementById('detail-contact').textContent =
+    detailCompany['Contact Name'] ? `${detailCompany['Contact Name']} <${detailCompany['Contact Email']||''}>` : (row?.latestContact || '—');
+  document.getElementById('detail-mandate').textContent = detailCompany['Mandate Type'] || '—';
+  document.getElementById('detail-aum').textContent     = detailCompany['AUM (M€)'] ? detailCompany['AUM (M€)'] + ' M€' : '—';
+  document.getElementById('detail-notes').textContent   = detailCompany['Notes'] || '—';
+  document.getElementById('detail-first').textContent   = detailCompany['First Contact Date'] || '—';
+  document.getElementById('detail-last').textContent    = row?.lastDateLabel || detailCompany['Last Email Date'] || '—';
+  document.getElementById('detail-domain').textContent  = row.domain || '—';
 
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  loadCompanyEmails(name, company);
+  document.getElementById('detail-edit-btn').onclick = () => {
+    if (company) openEditModal(row.name);
+    else document.getElementById('form-detail').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  document.getElementById('detail-status-btn').onclick = () => openStatusModal(row.name, detailCompany['Status'] || 'Initial Contact');
+  document.getElementById('detail-classify-btn').onclick = classifyCurrentDeal;
+  document.getElementById('detail-log-btn').onclick = () => logEmailsForCompany(getDetailFormData().Company || row.name);
+  document.getElementById('thread-live-btn').onclick = () => loadCompanyEmails(row.name, detailCompany, row, { live: true });
+  ['detail-edit-btn', 'detail-status-btn', 'detail-classify-btn', 'detail-log-btn'].forEach(id => {
+    document.getElementById(id).style.display = '';
+  });
+  document.getElementById('detail-edit-btn').textContent = company ? 'Edit' : 'Save Deal';
+
+  populateDetailForm(row, detailCompany, company);
+
+  state.currentEmails = [];
+  if (scroll) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  loadCompanyEmails(row.name, detailCompany, row);
 }
 
-async function loadCompanyEmails(name, company) {
-  const panel = document.getElementById('emails-panel');
-  panel.innerHTML = '<div style="padding:16px;text-align:center"><span class="spinner"></span></div>';
+function populateDetailForm(row, company, existingCompany = null) {
+  const f = document.getElementById('form-detail');
+  if (!f) return;
 
-  const searchTerm = company?.['Contact Email']
-    ? company['Contact Email'].split('@')[1] || name
-    : name;
+  const status = company['Status'] || 'Initial Contact';
+  f.elements['original_company'].value = existingCompany?.['Company'] || '';
+  f.elements['source'].value = row.source || '';
+  f.elements['company'].value = company['Company'] || row.name || '';
+  f.elements['contact_name'].value = company['Contact Name'] || contactNameFromRow(row);
+  f.elements['contact_email'].value = company['Contact Email'] || contactEmailFromRow(row);
+  f.elements['mandate_type'].value = company['Mandate Type'] || '';
+  f.elements['aum'].value = company['AUM (M€)'] || '';
+  f.elements['notes'].value = company['Notes'] || '';
+  f.elements['status'].innerHTML = state.statuses.map(s =>
+    `<option ${s===status?'selected':''}>${esc(s)}</option>`
+  ).join('');
+
+  const source = document.getElementById('detail-editor-source');
+  source.textContent = existingCompany ? 'Saved in Excel' : 'Email-only deal';
+}
+
+function contactNameFromRow(row) {
+  const contact = row?.latestContact || (row?.group?.contacts || [])[0] || '';
+  return contact.replace(/<[^>]+>/, '').trim();
+}
+
+function contactEmailFromRow(row) {
+  const contact = row?.latestContact || (row?.group?.contacts || [])[0] || '';
+  const match = contact.match(/<([^>]+)>/) || contact.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  return match ? (match[1] || match[0]) : '';
+}
+
+function getDetailFormData() {
+  const f = document.getElementById('form-detail');
+  const row = state.selectedDeal || {};
+  const contactEmail = f.elements['contact_email'].value.trim();
+  return {
+    Company:         f.elements['company'].value.trim(),
+    'Contact Name':  f.elements['contact_name'].value.trim(),
+    'Contact Email': contactEmail,
+    Status:          f.elements['status'].value,
+    'Mandate Type':  f.elements['mandate_type'].value.trim(),
+    'AUM (M€)':      f.elements['aum'].value.trim(),
+    'Last Email Date': row.lastDate ? String(row.lastDate).slice(0, 10) : '',
+    Notes:           f.elements['notes'].value.trim(),
+    _Domain:         row.domain || getEmailDomain(contactEmail),
+  };
+}
+
+async function submitDetailUpdate() {
+  const f = document.getElementById('form-detail');
+  const original = f.elements['original_company'].value.trim();
+  const data = getDetailFormData();
+  if (!data.Company) { toast('Deal name is required', 'error'); return; }
 
   try {
-    const data = await API.get(`/api/emails/search?q=${encodeURIComponent(searchTerm)}`);
-    state.currentEmails = data.messages || [];
-    renderEmailsPanel(state.currentEmails);
+    if (original) {
+      await API.put(`/api/companies/${encodeURIComponent(original)}/details`, data);
+    } else {
+      await API.post('/api/companies', data);
+    }
+    toast('Deal corrections saved', 'success');
+    await loadCompanies();
+    renderAll();
+
+    const href = `/deal/company/${encodeURIComponent(data.Company)}`;
+    if (isDealPage() && window.location.pathname !== href) {
+      history.replaceState(null, '', href);
+      state.route = parseDealRoute();
+      applyRouteChrome();
+    }
+    selectCompany(data.Company);
   } catch (e) {
-    panel.innerHTML = `<div class="empty-state">Could not load emails: ${esc(e.message)}</div>`;
+    toast('Save failed: ' + e.message, 'error');
   }
 }
 
-function renderEmailsPanel(emails) {
+function applyClassificationResult(result) {
+  const f = document.getElementById('form-detail');
+  if (!f || !result) return;
+  if (result.Company) f.elements['company'].value = result.Company;
+  if (result['Contact Name']) f.elements['contact_name'].value = result['Contact Name'];
+  if (result['Contact Email']) f.elements['contact_email'].value = result['Contact Email'];
+  if (result.Status && state.statuses.includes(result.Status)) f.elements['status'].value = result.Status;
+  if (result['Mandate Type']) f.elements['mandate_type'].value = result['Mandate Type'];
+  if (result['AUM (M€)'] !== undefined) f.elements['aum'].value = result['AUM (M€)'];
+  if (result.Notes) f.elements['notes'].value = result.Notes;
+}
+
+async function classifyCurrentDeal() {
+  const row = state.selectedDeal;
+  if (!row) return;
+
+  const btn = document.getElementById('detail-classify-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Classifying...';
+  try {
+    const emails = state.currentEmails.length
+      ? state.currentEmails
+      : await loadCompanyEmails(row.name, row.company, row);
+    const data = await API.post('/api/deals/classify', {
+      domain: row.domain,
+      company_name: row.name,
+      contacts: row.group?.contacts || [],
+      emails,
+      last_email_date: row.lastDate,
+    });
+    applyClassificationResult(data.result);
+    toast('Classification loaded for review', 'success');
+  } catch (e) {
+    toast('Classification failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Classify';
+  }
+}
+
+async function loadCompanyEmails(name, company, row = null, { live = false } = {}) {
   const panel = document.getElementById('emails-panel');
-  if (!emails.length) {
+  panel.innerHTML = '<div style="padding:16px;text-align:center"><span class="spinner"></span></div>';
+  setThreadSource(live ? 'Searching Outlook...' : 'Loading cached thread...');
+
+  const searchTerm = row?.domain || (company?.['Contact Email']
+    ? company['Contact Email'].split('@')[1] || name
+    : name);
+
+  try {
+    const url = live
+      ? `/api/emails/search?q=${encodeURIComponent(searchTerm)}`
+      : `/api/emails/thread?${new URLSearchParams({
+          domain: row?.domain || '',
+          email: company?.['Contact Email'] || '',
+          company: name || '',
+          limit: '160',
+        }).toString()}`;
+    const data = await API.get(url);
+    state.currentEmails = data.messages || [];
+    renderEmailsPanel(state.currentEmails, {
+      source: live ? 'outlook' : data.source,
+      total: data.total ?? state.currentEmails.length,
+      cachedAt: data.cached_at,
+    });
+    return state.currentEmails;
+  } catch (e) {
+    setThreadSource('');
+    panel.innerHTML = `<div class="empty-state">Could not load emails: ${esc(e.message)}</div>`;
+    return [];
+  }
+}
+
+function setThreadSource(text) {
+  const el = document.getElementById('thread-source');
+  if (el) el.textContent = text || '';
+}
+
+function renderEmailsPanel(emails, meta = {}) {
+  const panel = document.getElementById('emails-panel');
+  const orderedEmails = [...emails].sort((a, b) => dateSortValue(b.receivedDateTime) - dateSortValue(a.receivedDateTime));
+  state.currentEmails = orderedEmails;
+  const source = meta.source === 'outlook' ? 'Live Outlook search' : 'Cached thread';
+  const total = meta.total ?? orderedEmails.length;
+  const cacheAge = meta.cachedAt ? ` - cache ${_cacheAgeText(meta.cachedAt)}` : '';
+  setThreadSource(`${source} - ${orderedEmails.length}${total > orderedEmails.length ? ` of ${total}` : ''} email(s)${cacheAge}`);
+
+  if (!orderedEmails.length) {
     panel.innerHTML = '<div class="empty-state">No emails found matching this company.</div>';
     return;
   }
-  panel.innerHTML = emails.map(e => {
-    const ea      = (e.from?.emailAddress) || {};
+  panel.innerHTML = orderedEmails.map((e, idx) => {
+    const sender  = (e.sender?.emailAddress) || (e.from?.emailAddress) || {};
+    const external = ((e.external_participants || [])[0]?.emailAddress) || (e.from?.emailAddress) || {};
     const date    = (e.receivedDateTime || '').replace('T',' ').slice(0,16);
-    const isOwn   = (ea.address||'').toLowerCase().includes(
-      (document.getElementById('user-info').textContent.split('@')[0]||'').toLowerCase()
-    );
+    const isOut   = e.direction ? e.direction === 'OUT' : (e.folder || '').toLowerCase() === 'sent';
+    const recipients = [...(e.toRecipients || []), ...(e.ccRecipients || [])]
+      .map(r => (r.emailAddress || {}).address)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(', ');
     return `
-      <div class="email-item">
+      <div class="email-item" tabindex="0" title="Open email"
+           ondblclick="openEmailModal(${idx})"
+           onkeydown="if(event.key==='Enter')openEmailModal(${idx})">
         <div class="email-subject">
-          <span class="${isOwn ? 'dir-out' : 'dir-in'}">${isOwn ? 'OUT' : 'IN'}</span>
+          <span class="${isOut ? 'dir-out' : 'dir-in'}">${isOut ? 'OUT' : 'IN'}</span>
           ${esc(e.subject || '(no subject)')}
         </div>
         <div class="email-meta">
-          ${esc(ea.name||'')} &lt;${esc(ea.address||'')}&gt; · ${esc(date)}
+          Client: ${esc(external.name || '')} &lt;${esc(external.address || '')}&gt; ·
+          From: ${esc(sender.name || '')} &lt;${esc(sender.address || '')}&gt;${recipients ? ` · To/Cc: ${esc(recipients)}` : ''} · ${esc(date)}
         </div>
         ${e.bodyPreview ? `<div class="email-preview">${esc((e.bodyPreview||'').slice(0,200))}${(e.bodyPreview||'').length>200?'…':''}</div>` : ''}
       </div>`;
   }).join('');
+}
+
+function openEmailModal(index) {
+  const email = state.currentEmails[index];
+  if (!email) return;
+
+  renderEmailModal(email, { loading: Boolean(email.id) });
+  document.getElementById('modal-email').style.display = 'flex';
+  if (email.id) hydrateEmailModal(index, email.id);
+}
+
+function closeEmailModal() {
+  document.getElementById('modal-email').style.display = 'none';
+}
+
+async function hydrateEmailModal(index, messageId) {
+  try {
+    const data = await API.post('/api/emails/message', { id: messageId });
+    const email = data.message || {};
+    if (email.id) state.currentEmails[index] = { ...state.currentEmails[index], ...email };
+    renderEmailModal(state.currentEmails[index] || email, {
+      loading: false,
+      source: data.source,
+      warning: data.warning,
+    });
+    if (data.warning) toast('Opened cached email preview; Outlook full body was unavailable.', 'error');
+  } catch (e) {
+    renderEmailModal(state.currentEmails[index], { loading: false, warning: e.message });
+    toast('Could not load full email: ' + e.message, 'error');
+  }
+}
+
+function renderEmailModal(email, { loading = false, warning = '', source = '' } = {}) {
+  const sender = (email.sender?.emailAddress) || (email.from?.emailAddress) || {};
+  const date = (email.receivedDateTime || '').replace('T', ' ').slice(0, 16);
+  const isOut = email.direction ? email.direction === 'OUT' : (email.folder || '').toLowerCase() === 'sent';
+  const to = formatEmailList(email.toRecipients || []);
+  const cc = formatEmailList(email.ccRecipients || []);
+  const body = emailBodyText(email);
+  const sourceText = source === 'outlook' ? 'Outlook' : source === 'cache' ? 'Cache' : '';
+
+  document.getElementById('email-modal-direction').innerHTML =
+    `<span class="${isOut ? 'dir-out' : 'dir-in'}">${isOut ? 'OUT' : 'IN'}</span>`;
+  document.getElementById('email-modal-subject').textContent = email.subject || '(no subject)';
+  document.getElementById('email-modal-meta').innerHTML = [
+    `<div><strong>From:</strong> ${esc(formatEmailPerson(sender))}</div>`,
+    to ? `<div><strong>To:</strong> ${esc(to)}</div>` : '',
+    cc ? `<div><strong>Cc:</strong> ${esc(cc)}</div>` : '',
+    `<div><strong>Date:</strong> ${esc(date || '—')}${sourceText ? ` · ${esc(sourceText)}` : ''}</div>`,
+  ].filter(Boolean).join('');
+  const visibleBody = esc(body || email.bodyPreview || '');
+  document.getElementById('email-modal-body').innerHTML = loading
+    ? `${visibleBody}${visibleBody ? '<br><br>' : ''}<div class="email-modal-loading"><span class="spinner"></span> Loading email content...</div>`
+    : `${warning ? `<div class="email-modal-loading">${esc(warning)}</div><br>` : ''}${visibleBody || '<div class="empty-state compact">No content available.</div>'}`;
+}
+
+function emailBodyText(email) {
+  const raw = email?.body?.content || email?.body || email?.bodyPreview || '';
+  if (typeof raw !== 'string') return '';
+  if (!/<[a-z][\s\S]*>/i.test(raw)) return raw.trim();
+  const normalized = raw
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n');
+  return normalized.replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function formatEmailPerson(person) {
+  const name = person?.name || '';
+  const address = person?.address || '';
+  if (name && address) return `${name} <${address}>`;
+  return name || address || '—';
+}
+
+function formatEmailList(recipients) {
+  return recipients
+    .map(r => formatEmailPerson((r || {}).emailAddress || {}))
+    .filter(Boolean)
+    .join(', ');
+}
+
+function _cacheAgeText(ts) {
+  const mins = Math.round((Date.now() / 1000 - ts) / 60);
+  if (mins < 2) return 'just now';
+  if (mins < 60) return `${mins}m old`;
+  return `${Math.round(mins / 60)}h old`;
 }
 
 async function logEmailsForCompany(name) {
@@ -324,6 +982,7 @@ async function submitAddCompany() {
     'AUM (M€)':      f.elements['aum'].value.trim(),
     Notes:           f.elements['notes'].value.trim(),
   };
+  data._Domain = getEmailDomain(data['Contact Email']);
   if (!data.Company) { toast('Company name is required', 'error'); return; }
   try {
     await API.post('/api/companies', data);
@@ -340,6 +999,7 @@ function openEditModal(name) {
   const modal = document.getElementById('modal-edit');
   modal.style.display = 'flex';
   const f = document.getElementById('form-edit');
+  f.elements['original_company'].value = c['Company'] || '';
   f.elements['company'].value       = c['Company'] || '';
   f.elements['contact_name'].value  = c['Contact Name'] || '';
   f.elements['contact_email'].value = c['Contact Email'] || '';
@@ -354,6 +1014,7 @@ function closeEditModal() { document.getElementById('modal-edit').style.display 
 
 async function submitEditCompany() {
   const f = document.getElementById('form-edit');
+  const original = f.elements['original_company'].value.trim();
   const data = {
     Company:         f.elements['company'].value.trim(),
     'Contact Name':  f.elements['contact_name'].value.trim(),
@@ -363,13 +1024,19 @@ async function submitEditCompany() {
     'AUM (M€)':      f.elements['aum'].value.trim(),
     Notes:           f.elements['notes'].value.trim(),
   };
+  data._Domain = getEmailDomain(data['Contact Email']);
   try {
-    await API.post('/api/companies', data);
+    await API.put(`/api/companies/${encodeURIComponent(original || data.Company)}/details`, data);
     toast('Company updated', 'success');
     closeEditModal();
     await loadCompanies();
     renderAll();
-    if (state.selectedCompany === data.Company) selectCompany(data.Company);
+    if (isDealPage()) {
+      history.replaceState(null, '', `/deal/company/${encodeURIComponent(data.Company)}`);
+      state.route = parseDealRoute();
+      applyRouteChrome();
+    }
+    if (state.selectedCompany === original || state.selectedCompany === data.Company) selectCompany(data.Company);
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -389,13 +1056,28 @@ async function submitStatusChange() {
   const status = document.getElementById('status-select').value;
   const notes  = document.getElementById('status-notes').value.trim();
   try {
-    await API.put(`/api/companies/${encodeURIComponent(name)}/status`,
-      { status, notes: notes || undefined });
+    const existing = state.companies.find(c => c['Company'] === name);
+    if (existing) {
+      await API.put(`/api/companies/${encodeURIComponent(name)}/status`,
+        { status, notes: notes || undefined });
+    } else {
+      const data = getDetailFormData();
+      data.Company = data.Company || name;
+      data.Status = status;
+      if (notes) data.Notes = notes;
+      await API.post('/api/companies', data);
+    }
     toast(`Status updated → "${status}"`, 'success');
     closeStatusModal();
     await loadCompanies();
     renderAll();
-    if (state.selectedCompany === name) selectCompany(name);
+    const savedName = existing ? name : (getDetailFormData().Company || name);
+    if (isDealPage() && !existing) {
+      history.replaceState(null, '', `/deal/company/${encodeURIComponent(savedName)}`);
+      state.route = parseDealRoute();
+      applyRouteChrome();
+    }
+    if (state.selectedCompany === name || state.selectedCompany === savedName) selectCompany(savedName);
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -411,6 +1093,7 @@ function openSettingsModal() {
     document.getElementById('settings-email').textContent       = d.email       || '—';
     document.getElementById('settings-imap').textContent        = d.imap_server  || '—';
     document.getElementById('settings-excel').textContent       = d.excel_path   || '—';
+    document.getElementById('settings-followup-days').textContent = d.follow_up_days || cfg.follow_up_days || state.followUpDays;
     document.getElementById('settings-ollama-host').textContent  = cfg.ollama_host  || '—';
     document.getElementById('settings-ollama-model').textContent = cfg.ollama_model || '—';
   }).catch(() => {});
@@ -587,14 +1270,40 @@ async function reloadAfterClassify() {
 }
 
 // ── Search / filter ────────────────────────────────────────────────────────
-function onSearch()       { renderCompaniesTable(); }
-function onFilterChange() { renderCompaniesTable(); }
+function onSearch() { renderCompaniesTable(); }
+function onFilterChange() {
+  state.workflowFilter = document.getElementById('filter-workflow')?.value || '';
+  renderStats();
+  renderFocusQueue();
+  renderSidebar();
+  renderCompaniesTable();
+}
+
+function setWorkflowFilter(value) {
+  state.workflowFilter = state.workflowFilter === value ? '' : value;
+  const sel = document.getElementById('filter-workflow');
+  if (sel) sel.value = state.workflowFilter;
+  renderStats();
+  renderFocusQueue();
+  renderSidebar();
+  renderCompaniesTable();
+}
 
 function populateFilterDropdown() {
   const sel = document.getElementById('filter-status');
   const cur = sel.value;
   sel.innerHTML = '<option value="">All Statuses</option>' +
     state.statuses.map(s => `<option ${s===cur?'selected':''}>${esc(s)}</option>`).join('');
+}
+
+function populateWorkflowDropdown() {
+  const sel = document.getElementById('filter-workflow');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All Actions</option>' +
+    Object.entries(WORKFLOW).map(([key, cfg]) =>
+      `<option value="${key}" ${key===cur?'selected':''}>${esc(cfg.label)}</option>`
+    ).join('');
 }
 
 // ── Refresh / download ─────────────────────────────────────────────────────

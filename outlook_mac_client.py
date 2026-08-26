@@ -4,7 +4,7 @@ No IMAP, no passwords — talks directly to the running Outlook desktop app.
 import subprocess
 import json
 
-from config.settings import OUTLOOK_EMAIL
+from config.settings import INTERNAL_EMAIL_DOMAINS, OUTLOOK_EMAIL
 
 _FETCH_LIMIT = 10000   # effectively "all" — cap is the folder size itself
 _MONTHS_BACK = 60      # 5 years of history
@@ -132,6 +132,36 @@ FOLDER_HELPERS
         if (!name) { try { name = rec.emailAddress.name || ''; } catch(e) {} }
         return name;
     }
+    function getSenderAddr(m) {
+        var addr = '';
+        try { addr = m.sender.emailAddress.address() || ''; } catch(e) {}
+        if (!addr) { try { addr = m.sender.emailAddress.address || ''; } catch(e) {} }
+        if (!addr) { try { var ea = m.sender.emailAddress(); addr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
+        return addr;
+    }
+    function getSenderName(m) {
+        var name = '';
+        try { name = m.sender.emailAddress.name() || ''; } catch(e) {}
+        if (!name) { try { name = m.sender.emailAddress.name || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.name()        || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.displayName() || ''; } catch(e) {} }
+        return name;
+    }
+    function collectRecipients(m, fnName) {
+        var out = [];
+        try {
+            var recips = [];
+            if (fnName === 'toRecipients') recips = m.toRecipients();
+            else if (fnName === 'ccRecipients') recips = m.ccRecipients();
+            else if (fnName === 'bccRecipients') recips = m.bccRecipients();
+            for (var i = 0; i < recips.length; i++) {
+                var addr = getAddrFromRecord(recips[i]);
+                var name = getNameFromRecord(recips[i]);
+                if (addr || name) out.push({ address: addr, name: name });
+            }
+        } catch(e) {}
+        return out;
+    }
 
     function addMsg(m, folderName) {
         try {
@@ -143,34 +173,11 @@ FOLDER_HELPERS
             if (!d) return;
             if (d.getTime() < cutoffMs) return;
 
-            var fromAddr = '', fromName = '';
-
-            if (folderName === 'Sent') {
-                // For sent items the user is the sender — use the first TO recipient
-                // to identify the company being emailed.
-                try {
-                    var recips = m.toRecipients();
-                    if (recips && recips.length > 0) {
-                        fromAddr = getAddrFromRecord(recips[0]);
-                        fromName = getNameFromRecord(recips[0]);
-                    }
-                } catch(e) {}
-            } else {
-                // For inbox, use the actual sender.
-                // sender.emailAddress is a record {address, name} in Outlook Mac.
-                try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
-                if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
-                if (!fromAddr) {
-                    try {
-                        var ea = m.sender.emailAddress();
-                        fromAddr = (typeof ea === 'string') ? ea : '';
-                    } catch(e) {}
-                }
-                try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
-                if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
-                if (!fromName) { try { fromName = m.sender.name()        || ''; } catch(e) {} }
-                if (!fromName) { try { fromName = m.sender.displayName() || ''; } catch(e) {} }
-            }
+            var fromAddr = getSenderAddr(m);
+            var fromName = getSenderName(m);
+            var toRecipients = collectRecipients(m, 'toRecipients');
+            var ccRecipients = collectRecipients(m, 'ccRecipients');
+            var bccRecipients = collectRecipients(m, 'bccRecipients');
 
             seen[id] = true;
             result.push({
@@ -178,6 +185,9 @@ FOLDER_HELPERS
                 subject:  m.subject() || '',
                 fromAddr: fromAddr,
                 fromName: fromName,
+                toRecipients: toRecipients,
+                ccRecipients: ccRecipients,
+                bccRecipients: bccRecipients,
                 date:     d.toISOString(),
                 preview:  '',
                 folder:   folderName
@@ -265,26 +275,60 @@ FOLDER_HELPERS
         if (!n) { try { n = rec.emailAddress.name || ''; } catch(e) {} }
         return n;
     }
+    function getSenderAddr(m) {
+        var addr = '';
+        try { addr = m.sender.emailAddress.address() || ''; } catch(e) {}
+        if (!addr) { try { addr = m.sender.emailAddress.address || ''; } catch(e) {} }
+        if (!addr) { try { var ea = m.sender.emailAddress(); addr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
+        return addr;
+    }
+    function getSenderName(m) {
+        var name = '';
+        try { name = m.sender.emailAddress.name() || ''; } catch(e) {}
+        if (!name) { try { name = m.sender.emailAddress.name || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.name() || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.displayName() || ''; } catch(e) {} }
+        return name;
+    }
+    function collectRecipients(m, fnName) {
+        var out = [];
+        try {
+            var recips = [];
+            if (fnName === 'toRecipients') recips = m.toRecipients();
+            else if (fnName === 'ccRecipients') recips = m.ccRecipients();
+            else if (fnName === 'bccRecipients') recips = m.bccRecipients();
+            for (var i = 0; i < recips.length; i++) {
+                var addr = getAddrM(recips[i]);
+                var name = getNameM(recips[i]);
+                if (addr || name) out.push({ address: addr, name: name });
+            }
+        } catch(e) {}
+        return out;
+    }
+    function recipientText(recips) {
+        var parts = [];
+        for (var i = 0; i < recips.length; i++) {
+            parts.push((recips[i].name || '') + ' ' + (recips[i].address || ''));
+        }
+        return parts.join(' ').toLowerCase();
+    }
 
     function matchMsg(m, folderName) {
         try {
             var id = String(m.id());
             if (seen[id]) return;
-            var fromAddr = '', fromName = '';
-            if (folderName === 'Sent') {
-                try { var r = m.toRecipients(); if (r && r.length > 0) { fromAddr = getAddrM(r[0]); fromName = getNameM(r[0]); } } catch(e) {}
-            } else {
-                try { fromAddr = m.sender.emailAddress.address() || ''; } catch(e) {}
-                if (!fromAddr) { try { fromAddr = m.sender.emailAddress.address || ''; } catch(e) {} }
-                if (!fromAddr) { try { var ea = m.sender.emailAddress(); fromAddr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
-                try { fromName = m.sender.emailAddress.name() || ''; } catch(e) {}
-                if (!fromName) { try { fromName = m.sender.emailAddress.name || ''; } catch(e) {} }
-                if (!fromName) { try { fromName = m.sender.name() || ''; } catch(e) {} }
-            }
+            var fromAddr = getSenderAddr(m);
+            var fromName = getSenderName(m);
+            var toRecipients = collectRecipients(m, 'toRecipients');
+            var ccRecipients = collectRecipients(m, 'ccRecipients');
+            var bccRecipients = collectRecipients(m, 'bccRecipients');
             var subj = (m.subject() || '').toLowerCase();
             var q    = query.toLowerCase();
             if (subj.indexOf(q) < 0 && fromAddr.toLowerCase().indexOf(q) < 0
-                && fromName.toLowerCase().indexOf(q) < 0) return;
+                && fromName.toLowerCase().indexOf(q) < 0
+                && recipientText(toRecipients).indexOf(q) < 0
+                && recipientText(ccRecipients).indexOf(q) < 0
+                && recipientText(bccRecipients).indexOf(q) < 0) return;
             var d;
             try { d = m.timeReceived(); } catch(e) {}
             if (!d) { try { d = m.timeSent(); } catch(e) {} }
@@ -298,6 +342,9 @@ FOLDER_HELPERS
                 subject:  m.subject() || '',
                 fromAddr: fromAddr,
                 fromName: fromName,
+                toRecipients: toRecipients,
+                ccRecipients: ccRecipients,
+                bccRecipients: bccRecipients,
                 date:     d.toISOString(),
                 preview:  preview,
                 folder:   folderName
@@ -337,6 +384,148 @@ FOLDER_HELPERS
 
     result.sort(function(a, b) { return b.date.localeCompare(a.date); });
     return JSON.stringify(result);
+})()
+""".replace("FOLDER_HELPERS", _FOLDER_HELPERS)
+
+# ── Full message fetch ────────────────────────────────────────────────────
+
+_SCRIPT_GET_MESSAGE = """\
+(function() {
+    var app       = Application('Microsoft Outlook');
+    var messageId = MESSAGE_ID_JSON;
+    var folderHint = FOLDER_HINT_JSON;
+    var result    = null;
+
+FOLDER_HELPERS
+
+    function getAddrFromRecord(rec) {
+        var addr = '';
+        try { var ea = rec.emailAddress(); if (ea && ea.address) { addr = String(ea.address); } } catch(e) {}
+        if (!addr) { try { addr = rec.emailAddress.address() || ''; } catch(e) {} }
+        if (!addr) { try { addr = rec.emailAddress.address || ''; } catch(e) {} }
+        return addr;
+    }
+    function getNameFromRecord(rec) {
+        var name = '';
+        try { var ea = rec.emailAddress(); if (ea && ea.name) { name = String(ea.name); } } catch(e) {}
+        if (!name) { try { name = rec.emailAddress.name() || ''; } catch(e) {} }
+        if (!name) { try { name = rec.emailAddress.name || ''; } catch(e) {} }
+        return name;
+    }
+    function getSenderAddr(m) {
+        var addr = '';
+        try { addr = m.sender.emailAddress.address() || ''; } catch(e) {}
+        if (!addr) { try { addr = m.sender.emailAddress.address || ''; } catch(e) {} }
+        if (!addr) { try { var ea = m.sender.emailAddress(); addr = (typeof ea === 'string') ? ea : ''; } catch(e) {} }
+        return addr;
+    }
+    function getSenderName(m) {
+        var name = '';
+        try { name = m.sender.emailAddress.name() || ''; } catch(e) {}
+        if (!name) { try { name = m.sender.emailAddress.name || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.name()        || ''; } catch(e) {} }
+        if (!name) { try { name = m.sender.displayName() || ''; } catch(e) {} }
+        return name;
+    }
+    function collectRecipients(m, fnName) {
+        var out = [];
+        try {
+            var recips = [];
+            if (fnName === 'toRecipients') recips = m.toRecipients();
+            else if (fnName === 'ccRecipients') recips = m.ccRecipients();
+            else if (fnName === 'bccRecipients') recips = m.bccRecipients();
+            for (var i = 0; i < recips.length; i++) {
+                var addr = getAddrFromRecord(recips[i]);
+                var name = getNameFromRecord(recips[i]);
+                if (addr || name) out.push({ address: addr, name: name });
+            }
+        } catch(e) {}
+        return out;
+    }
+    function bodyText(m) {
+        var body = '';
+        try { body = m.plainTextContent() || ''; } catch(e) {}
+        if (!body) { try { body = m.content() || ''; } catch(e) {} }
+        if (!body) { try { body = m.body() || ''; } catch(e) {} }
+        return String(body || '');
+    }
+    function capture(m, folderName) {
+        try {
+            var id = String(m.id());
+            if (id !== messageId) return false;
+            var d;
+            try { d = m.timeReceived(); } catch(e) {}
+            if (!d) { try { d = m.timeSent(); } catch(e) {} }
+            var body = bodyText(m);
+            result = {
+                id: id,
+                subject: m.subject() || '',
+                fromAddr: getSenderAddr(m),
+                fromName: getSenderName(m),
+                toRecipients: collectRecipients(m, 'toRecipients'),
+                ccRecipients: collectRecipients(m, 'ccRecipients'),
+                bccRecipients: collectRecipients(m, 'bccRecipients'),
+                date: d ? d.toISOString() : '',
+                preview: body.replace(/\\s+/g, ' ').substring(0, 280),
+                body: body,
+                folder: folderName
+            };
+            return true;
+        } catch(e) {}
+        return false;
+    }
+    function searchFolder(folder, label) {
+        if (result) return;
+        try {
+            var msgs = folder.messages();
+            for (var i = msgs.length - 1; i >= 0; i--) {
+                if (capture(msgs[i], label)) return;
+            }
+        } catch(e) {}
+
+        var consec = 0;
+        for (var idx = 0; idx < 10000 && !result; idx++) {
+            try {
+                if (capture(folder.messages[idx], label)) return;
+                consec = 0;
+            } catch(e) {
+                if (++consec >= 5) break;
+            }
+        }
+    }
+    function searchAllFolders() {
+        try { searchFolder(app.inbox, 'Inbox'); } catch(e) {}
+        try {
+            var top = app.mailFolders();
+            for (var k = 0; k < top.length && !result; k++) {
+                try { searchFolder(top[k], top[k].name()); } catch(e) {}
+            }
+        } catch(e) {}
+    }
+    function findFolder(root, name) {
+        try {
+            var subs = root.mailFolders();
+            for (var i = 0; i < subs.length; i++) {
+                try {
+                    var n = String(subs[i].name() || '').toLowerCase();
+                    var t = name.toLowerCase();
+                    if (n === t || n.indexOf(t) >= 0 || t.indexOf(n) >= 0) {
+                        return subs[i];
+                    }
+                } catch(e) {}
+            }
+        } catch(e) {}
+        return null;
+    }
+
+    if (folderHint) {
+        var f = findFolder(app, folderHint);
+        if (f) { searchFolder(f, folderHint); }
+        if (result) { return JSON.stringify(result); }
+    }
+
+    searchAllFolders();
+    return JSON.stringify(result || {});
 })()
 """.replace("FOLDER_HELPERS", _FOLDER_HELPERS)
 
@@ -509,22 +698,102 @@ _SCRIPT_LIST_FOLDERS = """\
 
 # ── Conversion ────────────────────────────────────────────────────────────
 
+def _email_obj(name: str = "", address: str = "") -> dict:
+    return {"emailAddress": {"name": name or "", "address": address or ""}}
+
+
+def _email_domain(address: str) -> str:
+    address = (address or "").lower().strip()
+    return address.split("@")[-1] if "@" in address else ""
+
+
+def _internal_domains() -> set[str]:
+    domains = {d.lower() for d in INTERNAL_EMAIL_DOMAINS}
+    if "@" in OUTLOOK_EMAIL:
+        domains.add(OUTLOOK_EMAIL.split("@")[-1].lower())
+    return domains
+
+
+def _is_internal_address(address: str) -> bool:
+    domain = _email_domain(address)
+    return bool(domain and domain in _internal_domains())
+
+
+def _recipient_list(raw: dict, key: str) -> list[dict]:
+    recipients = []
+    for rec in raw.get(key, []) or []:
+        if isinstance(rec, dict):
+            recipients.append(_email_obj(rec.get("name", ""), rec.get("address", "")))
+    return recipients
+
+
+def _dedupe_people(people: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+    for person in people:
+        name, addr = parse_email_address(person)
+        key = (addr or name).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(_email_obj(name, addr))
+    return out
+
+
+def external_participants_for_message(msg: dict) -> list[dict]:
+    people = []
+    for key in ("sender", "from"):
+        if msg.get(key):
+            people.append(msg[key])
+    for key in ("toRecipients", "ccRecipients", "bccRecipients"):
+        people.extend(msg.get(key, []) or [])
+    return _dedupe_people([
+        person for person in people
+        if not _is_internal_address(parse_email_address(person)[1])
+    ])
+
+
+def external_domains_for_message(msg: dict) -> list[str]:
+    domains = []
+    seen = set()
+    for person in external_participants_for_message(msg):
+        _, addr = parse_email_address(person)
+        domain = _email_domain(addr)
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
+
+
 def _to_message_dict(raw: dict) -> dict:
-    return {
+    sender = _email_obj(raw.get("fromName", ""), raw.get("fromAddr", ""))
+    to_recipients = _recipient_list(raw, "toRecipients")
+    cc_recipients = _recipient_list(raw, "ccRecipients")
+    bcc_recipients = _recipient_list(raw, "bccRecipients")
+    msg = {
         "id":               raw.get("id", ""),
         "conversationId":   raw.get("id", ""),
         "subject":          raw.get("subject", ""),
-        "from": {
-            "emailAddress": {
-                "name":    raw.get("fromName", ""),
-                "address": raw.get("fromAddr", ""),
-            }
-        },
+        "sender":           sender,
+        "from":             sender,
+        "toRecipients":     to_recipients,
+        "ccRecipients":     cc_recipients,
+        "bccRecipients":    bcc_recipients,
         "receivedDateTime": raw.get("date", ""),
         "bodyPreview":      raw.get("preview", ""),
+        "body":             {"contentType": "text", "content": raw.get("body", "")},
         "isRead":           True,
         "folder":           raw.get("folder", ""),
     }
+    external = external_participants_for_message(msg)
+    msg["external_participants"] = external
+    msg["direction"] = _direction_for_message(msg)
+    if external:
+        # Keep the Graph-like "from" field useful for existing UI/code by
+        # pointing it at the external counterparty, even when an internal
+        # colleague sent the message to the client.
+        msg["from"] = external[0]
+    return msg
 
 
 # ── Client ────────────────────────────────────────────────────────────────
@@ -629,6 +898,15 @@ class OutlookMacClient:
         raw = _run_jxa(script, timeout=180)
         return [_to_message_dict(r) for r in raw[:limit]]
 
+    def get_message(self, message_id: str, folder_hint: str = "") -> dict:
+        script = (_SCRIPT_GET_MESSAGE
+                  .replace("MESSAGE_ID_JSON", json.dumps(message_id))
+                  .replace("FOLDER_HINT_JSON", json.dumps(folder_hint)))
+        raw = _run_jxa(script, timeout=180)
+        if not raw:
+            return {}
+        return _to_message_dict(raw)
+
     def get_folders(self) -> list:
         return _run_jxa(_SCRIPT_LIST_FOLDERS, timeout=30)
 
@@ -642,28 +920,88 @@ def parse_email_address(address_obj):
     return ea.get("name", ""), ea.get("address", "")
 
 
+def _direction_for_message(msg: dict) -> str:
+    if not msg.get("sender") and (msg.get("folder") or "").lower() == "sent":
+        return "OUT"
+    _, sender_addr = parse_email_address(msg.get("sender") or msg.get("from"))
+    if sender_addr and not _is_internal_address(sender_addr):
+        return "IN"
+    external_recipients = []
+    for key in ("toRecipients", "ccRecipients", "bccRecipients"):
+        external_recipients.extend([
+            person for person in msg.get(key, []) or []
+            if not _is_internal_address(parse_email_address(person)[1])
+        ])
+    if external_recipients:
+        return "OUT"
+    return "OUT" if (msg.get("folder") or "").lower() == "sent" else "IN"
+
+
+def _meeting_signal(subject: str) -> str:
+    """Return a compact meeting status inferred from an email subject."""
+    s = (subject or "").lower()
+    if not s:
+        return ""
+    if any(k in s for k in ("cancelled", "canceled", "annulé", "annule")):
+        return "cancelled"
+    if any(k in s for k in ("accepted", "accepté", "accepte", "confirmed", "confirmation")):
+        return "accepted"
+    if any(k in s for k in ("tentative", "provisoire")):
+        return "tentative"
+    if any(k in s for k in ("zoom", "teams", "meeting", "call", "invite", "invitation", "calendar")):
+        return "scheduled"
+    return ""
+
+
 def group_messages_by_domain(messages: list) -> list:
-    own_domain = OUTLOOK_EMAIL.split("@")[-1].lower() if "@" in OUTLOOK_EMAIL else ""
     domain_map = {}
     for msg in messages:
-        _, from_addr = parse_email_address(msg.get("from"))
-        domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
-        if not domain or domain == own_domain:
+        external_people = external_participants_for_message(msg)
+        if not external_people:
             continue
-        if domain not in domain_map:
-            domain_map[domain] = {"domain": domain, "contacts": set(), "messages": []}
-        name, _ = parse_email_address(msg.get("from"))
-        domain_map[domain]["contacts"].add(f"{name} <{from_addr}>".strip())
-        domain_map[domain]["messages"].append(msg)
+        seen_domains = set()
+        for person in external_people:
+            name, addr = parse_email_address(person)
+            domain = _email_domain(addr)
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            if domain not in domain_map:
+                domain_map[domain] = {"domain": domain, "contacts": set(), "messages": []}
+            domain_map[domain]["contacts"].add(f"{name} <{addr}>".strip())
+            domain_map[domain]["messages"].append(msg)
 
     result = []
     for domain, info in domain_map.items():
         msgs = sorted(info["messages"], key=lambda m: m.get("receivedDateTime", ""), reverse=True)
+        latest = msgs[0] if msgs else {}
+        latest_people = external_participants_for_message(latest)
+        latest_name, latest_addr = parse_email_address(latest_people[0] if latest_people else latest.get("from"))
+        latest_contact = (
+            f"{latest_name} <{latest_addr}>".strip()
+            if latest_name and latest_addr else latest_name or latest_addr
+        )
+        meeting_msgs = [
+            (m, _meeting_signal(m.get("subject", "")))
+            for m in msgs
+            if _meeting_signal(m.get("subject", ""))
+        ]
+        latest_meeting = meeting_msgs[0] if meeting_msgs else ({}, "")
         result.append({
             "domain":          domain,
             "contacts":        list(info["contacts"]),
             "message_count":   len(msgs),
             "last_email_date": msgs[0].get("receivedDateTime", "") if msgs else "",
             "latest_subject":  msgs[0].get("subject", "") if msgs else "",
+            "latest_folder":   latest.get("folder", ""),
+            "latest_direction": _direction_for_message(latest) if latest else "",
+            "latest_contact":  latest_contact,
+            "inbox_count":     sum(1 for m in msgs if (m.get("folder") or "").lower() != "sent"),
+            "sent_count":      sum(1 for m in msgs if (m.get("folder") or "").lower() == "sent"),
+            "meeting_count":   len(meeting_msgs),
+            "latest_meeting_date": latest_meeting[0].get("receivedDateTime", ""),
+            "latest_meeting_subject": latest_meeting[0].get("subject", ""),
+            "latest_meeting_folder": latest_meeting[0].get("folder", ""),
+            "latest_meeting_signal": latest_meeting[1],
         })
     return sorted(result, key=lambda x: x["last_email_date"], reverse=True)

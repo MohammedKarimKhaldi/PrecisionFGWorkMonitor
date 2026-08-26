@@ -68,13 +68,23 @@ def classify_domain_emails(domain: str, emails: list, contacts: list) -> dict:
     """Classify a domain's email group and return a structured deal dict."""
     lines = []
     for em in sorted(emails, key=lambda e: e.get("receivedDateTime", ""), reverse=True)[:25]:
-        ea = (em.get("from") or {}).get("emailAddress", {})
-        from_str = f"{ea.get('name', '')} <{ea.get('address', '')}>".strip(" <>")
+        sender = (em.get("sender") or em.get("from") or {}).get("emailAddress", {})
+        sender_str = f"{sender.get('name', '')} <{sender.get('address', '')}>".strip(" <>")
+        recipients = []
+        for key in ("toRecipients", "ccRecipients", "bccRecipients"):
+            for rec in em.get(key, []) or []:
+                ea = (rec or {}).get("emailAddress", {})
+                label = f"{ea.get('name', '')} <{ea.get('address', '')}>".strip(" <>")
+                if label:
+                    recipients.append(label)
         date    = (em.get("receivedDateTime") or "")[:10]
         subject = em.get("subject") or "(no subject)"
         preview = (em.get("bodyPreview") or "").strip()
         folder  = em.get("folder", "")
-        line = f"[{date}] [{folder}] From: {from_str}\nSubject: {subject}"
+        line = f"[{date}] [{folder}] From: {sender_str}"
+        if recipients:
+            line += f"\nTo/Cc/Bcc: {', '.join(recipients[:8])}"
+        line += f"\nSubject: {subject}"
         if preview:
             line += f"\nPreview: {preview[:180]}"
         lines.append(line)
